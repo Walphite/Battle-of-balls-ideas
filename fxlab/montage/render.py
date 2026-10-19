@@ -88,11 +88,11 @@ def build_timeline(slots, t_start, total):
     return [(s, bounds[k + 1] - bounds[k]) for k, s in enumerate(sel)]
 
 
-def mux(clips, audio_args, out, list_path):
+def mux(clips, audio_args, out, list_path, maxrate="6M"):
     list_path.write_text("".join(f"file '{c}'\n" for c in clips))
     cmd = ["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path), *audio_args,
-           "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "medium", "-crf", "24", "-maxrate", "6M", "-bufsize", "12M",
-           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", str(out)]
+           "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "medium", "-crf", "24", "-maxrate", maxrate, "-bufsize", f"{2 * int(maxrate[:-1])}M",
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", "-shortest", str(out)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr[-600:])
@@ -123,7 +123,30 @@ def sample(style, total=10.0):
     return out, tl
 
 
+def full(style="B", tag="preview", maxrate="3M"):
+    """全片（540p 30fps，带配乐）。逐镜头缓存，可断点续跑。"""
+    st = STYLES[style]
+    slots = plan["slots"]
+    total = round(MP["w1"] - MP["w0"], 3)
+    total = round(total * FPS) / FPS
+    tl = build_timeline(slots, 0.0, total)
+    clips = []
+    for sl, n in tl:
+        o = ROOT / "work" / "cache" / f"full_{style}" / f"shot_{sl['i']:03d}.mp4"
+        render_shot(sl, st, n, PERIOD, o)
+        clips.append(o)
+    fade = 2 * 4 * PERIOD
+    audio = ["-ss", f"{MP['w0']:.3f}", "-t", f"{total}", "-i", str(MUSIC), "-af",
+             f"loudnorm=I=-10.5:TP=-2.6:LRA=7,alimiter=limit=0.72:level=0,afade=t=out:st={total - fade:.3f}:d={fade:.3f}"]
+    out = ROOT / "output" / f"{tag}_{style}.mp4"
+    mux(clips, audio, out, ROOT / "work" / "cache" / f"full_{style}" / "list.txt", maxrate)
+    return out, tl
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "full":
+        out, tl = full(sys.argv[2] if len(sys.argv) > 2 else "B")
+        print(out, sum(n for _, n in tl), "frames,", len(tl), "shots")
     if sys.argv[1] == "sample":
         out, tl = sample(sys.argv[2])
         print(out, sum(n for _, n in tl), "frames,", len(tl), "shots")
