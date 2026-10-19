@@ -1,0 +1,9 @@
+# 素材、缓存、成片不进仓库，只保留文件夹结构（.gitkeep）
+fxlab/montage/input/clips/*
+fxlab/montage/input/music/*
+fxlab/montage/work/*
+fxlab/montage/output/*
+!fxlab/montage/input/clips/.gitkeep
+!fxlab/montage/input/music/.gitkeep
+!fxlab/montage/work/.gitkeep
+!fxlab/montage/output/.gitkeep
