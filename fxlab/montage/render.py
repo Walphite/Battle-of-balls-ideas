@@ -15,8 +15,8 @@ CW, CH = 960, 540
 LEAD = 0.03  # 切点比拍点提前 30 ms
 
 STYLES = {
-    "A": dict(pulse=0.03, rgb=False, shake=0.0, flash=0.20, glitch=False, grain=5, base_zoom=1.0),
-    "B": dict(pulse=0.06, rgb=True, shake=0.015, flash=0.40, glitch=True, grain=14, base_zoom=1.03),
+    "A": dict(pulse=0.03, rgb=False, shake=0.0, flash=0.18, glitch=False, grain=5, base_zoom=1.0),
+    "B": dict(pulse=0.06, rgb=True, shake=0.015, flash=0.26, glitch=True, grain=14, base_zoom=1.03),
 }
 
 
@@ -117,7 +117,7 @@ def sample(style, total=10.0):
         clips.append(o)
     a0 = MP["w0"] + t_start
     audio = ["-ss", f"{a0:.3f}", "-t", f"{total}", "-i", str(MUSIC), "-af",
-             "loudnorm=I=-10:TP=-2.2:LRA=7,afade=t=out:st=9.4:d=0.6"]
+             "loudnorm=I=-10:TP=-2.6:LRA=7,afade=t=out:st=9.4:d=0.6"]
     out = ROOT / "output" / f"{tag}.mp4"
     mux(clips, audio, out, ROOT / "work" / "cache" / tag / "list.txt")
     return out, tl

@@ -15,16 +15,17 @@ MUSIC = ROOT / "input" / "music" / "music.flac"
 DOCS = ROOT.parent / "docs"
 FPS = 30
 W, H = 128, 72
-BPM_GRID = 104          # 稳定网格（见方案：104 与 156 都稳定，二者为 2:3 关系）
-N_BARS, DROP_BAR = 40, 27
+BPM_GRID = 156          # 稳定网格（见方案：104 与 156 都稳定，二者为 2:3 关系）
+N_BARS, DROP_BAR = 60, 40
+MAX_WIN = 3             # 每段最多窗口数（用户接受更多复用）
 MERGE_PAIRS = [(5, 6), (22, 23), (57, 58), (63, 64), (67, 68), (69, 70), (71, 72)]
 EXCLUDE = {17, 37, 49, 59, 73}
 SUSPICIOUS = {6, 9, 13, 15, 17, 22, 24, 26, 30, 35, 49, 59, 67, 69, 71, 76, 82, 85}
 TRIM = 5                # 0.15s ≈ 5 帧
 # (起始小节, 结束小节(含), 每小节镜头拍数, 段落)
-PATTERNS = [(0, 9, [4], "铺垫"), (10, 19, [2, 2], "推进"), (20, 26, [2, 1, 1], "推进"),
-            (27, 31, [1, 1, 1, 1], "高潮"), (32, 33, [1, 1, .5, .5, .5, .5], "高潮"),
-            (34, 37, [1, 1, 1, 1], "高潮"), (38, 39, [4], "收尾")]
+PATTERNS = [(0, 14, [4], "铺垫"), (15, 29, [2, 2], "推进"), (30, 39, [2, 1, 1], "推进"),
+            (40, 49, [1, 1, 1, 1], "高潮"), (50, 53, [1, 1, .5, .5, .5, .5], "高潮"),
+            (54, 57, [1, 1, 1, 1], "高潮"), (58, 59, [4], "收尾")]
 
 
 # ---------- 画面 ----------
@@ -151,7 +152,7 @@ def best_window(s, m, F, G, D, avoid=None):
     best, bs = None, -1
     sm = np.convolve(D, np.ones(3) / 3, "same")
     for st in range(u0, u1 - m + 1):
-        if avoid and not (st + m <= avoid[0] or st >= avoid[1]):
+        if avoid and any(not (st + m <= a0 or st >= b0) for a0, b0 in avoid):
             continue
         if any(st < j < st + m for j in s["joins"]):
             continue  # 窗口不跨越合并接缝
@@ -246,7 +247,8 @@ def effects(slots, mp):
         lo, hi = bounds.get(s["sec"], (1e9, -1e9))
         bounds[s["sec"]] = (min(lo, s["pos"]), max(hi, s["pos"]))
     hi_bars = [s for s in slots if s["sec"] == "高潮"]
-    glitch_idx = [hi_bars[0]["i"], [s["i"] for s in hi_bars if s["bar"] == 33][-1]]
+    half_bar = max(s["bar"] for s in hi_bars if s["beats"] == 0.5)
+    glitch_idx = [hi_bars[0]["i"], [s["i"] for s in hi_bars if s["bar"] == half_bar][-1]]
     for s in slots:
         mt = mp["w0"] + s["t"]
         ev = float(en[min(int(mt / 0.5), len(en) - 1)])
@@ -307,11 +309,11 @@ def assign_segments(slots, el, F, G, D, mp):
 
     def put(sg, sl):
         m = int(round(sl["need"] * FPS))
-        st, en = best_window(sg, m, F, G, D, avoid=None if sg["id"] not in wins else wins[sg["id"]][0])
+        st, en = best_window(sg, m, F, G, D, avoid=wins.get(sg["id"]))
         wins.setdefault(sg["id"], []).append((st, en))
         taken.setdefault(sg["id"], []).append(sl["i"])
         placed[sl["i"]] = sg
-        sl.update(seg=sg["id"], src_in=st / FPS, src_out=en / FPS, reuse=len(taken[sg["id"]]) == 2,
+        sl.update(seg=sg["id"], src_in=st / FPS, src_out=en / FPS, reuse=len(taken[sg["id"]]) >= 2,
                   score=round(sg["score"], 2))
 
     free = {sl["i"]: sl for sl in slots}
@@ -327,24 +329,32 @@ def assign_segments(slots, el, F, G, D, mp):
                  any(f["beats"] == 4 for f in free.values()) else 0))
         put(sg, sl)
         del free[sl["i"]]
-    # 第 2 轮：剩余槽位补第 2 个不重叠窗口
-    for sl in sorted(free.values(), key=lambda x: (-x["need"], x["i"])):
-        best, bc = None, 1e9
-        for sg in el:
-            if len(taken[sg["id"]]) >= 2:
+    # 第 2、3 轮：剩余槽位补不重叠窗口（每段最多 MAX_WIN 个，与已有各次间隔 ≥8 个镜头）
+    def room(sg):
+        ivs = sorted(wins[sg["id"]])
+        pts = [sg["u0"]] + [x for iv in ivs for x in iv] + [sg["u1"]]
+        return max(pts[k + 1] - pts[k] for k in range(0, len(pts), 2)) / FPS
+
+    for rnd in range(2, MAX_WIN + 1):
+        for sl in sorted(free.values(), key=lambda x: (-x["need"], x["i"])):
+            if sl["i"] not in free or "seg" in sl:
                 continue
-            a, b = wins[sg["id"]][0]
-            room = max(a - sg["u0"], sg["u1"] - b) / FPS
-            if room < sl["need"] - 1e-6:
-                continue
-            if any(abs(sl["i"] - j) < 8 for j in taken[sg["id"]]):
-                continue
-            c = cost(sg, sl, True)
-            if c < bc:
-                best, bc = sg, c
-        if best is None:
-            raise SystemExit(f"槽位 {sl['i']}（{sl['beats']} 拍）补不上第 2 个窗口")
-        put(best, sl)
+            best, bc = None, 1e9
+            for sg in el:
+                if len(taken[sg["id"]]) != rnd - 1:
+                    continue
+                if room(sg) < sl["need"] - 1e-6:
+                    continue
+                if any(abs(sl["i"] - j) < 8 for j in taken[sg["id"]]):
+                    continue
+                c = cost(sg, sl, True)
+                if c < bc:
+                    best, bc = sg, c
+            if best is not None:
+                put(best, sl)
+                del free[sl["i"]]
+    if free:
+        raise SystemExit(f"仍有 {len(free)} 个槽位无法填充：{[(i, f['beats']) for i, f in free.items()][:10]}")
     return slots, {k: len(v) for k, v in taken.items()}, thr
 
 
@@ -404,10 +414,10 @@ def main():
         maxrun = max(maxrun, run)
     used_src = sum(sl["src_out"] - sl["src_in"] for sl in slots)
     total = len(F) / FPS
-    gap_ok = all(abs(a_ - b_) >= 8 for v in [[sl["i"] for sl in slots if sl["seg"] == sid] for sid in seen]
-                 if len(v) == 2 for a_, b_ in [(v[0], v[1])])
+    gap_ok = all(b_ - a_ >= 8 for v in [[sl["i"] for sl in slots if sl["seg"] == sid] for sid in seen]
+                 for a_, b_ in zip(v, v[1:]))
     meta = dict(mp={k: v for k, v in mp.items() if k not in ("energy",)}, merge_report=merge_report,
-                n_slots=len(slots), distinct=len(uses), reused=sum(1 for v in uses.values() if v == 2),
+                n_slots=len(slots), distinct=len(uses), reused=len(slots) - len(uses), win_hist={k: sum(1 for v in uses.values() if v == k) for k in range(1, MAX_WIN + 1)},
                 util=used_src / total, used_src=used_src, total_src=total, maxflash=maxflash, maxrun=maxrun,
                 gap_ok=gap_ok, sim_thr=float(thr), elig=len(el),
                 merged=[s["id"] for s in segs if "+" in s["id"]],
@@ -424,9 +434,9 @@ def write_doc(meta, slots, seen, byid):
     p = mp["period"]
     Dd = N_BARS * 4 * p
     L = []
-    L.append("# 《球球大作战》卡点花式集锦 · 方案（已按第 2 次决定更新，未渲染）\n")
+    L.append("# 《球球大作战》卡点花式集锦 · 方案（已按 156 BPM、接受更多复用更新，未渲染）\n")
     L.append(f"成片 **{Dd:.1f} 秒**（{N_BARS} 小节 × 4 拍），镜头 **{meta['n_slots']}** 个，使用不同段 **{meta['distinct']}** 个，"
-             f"第 2 个窗口 **{meta['reused']}** 次，素材利用率 **{meta['util'] * 100:.0f}%**"
+             f"复用窗口 **{meta['reused']}** 次（窗口数分布 {meta['win_hist']}），素材利用率 **{meta['util'] * 100:.0f}%**"
              f"（成片取用素材 {meta['used_src']:.1f}s ÷ 原片 {meta['total_src']:.1f}s）。\n")
     L.append("## 1. 配乐窗口\n")
     L.append(f"- 网格 {mp['bpm']:.2f} BPM（拍长 {p * 1000:.0f} ms，残差 {mp['resid_ms']:.1f} ms）；drop 第一击 {mp['drop_beat']:.3f}s，对齐误差 {mp['align_err_ms']:+.0f} ms。\n"
@@ -436,7 +446,7 @@ def write_doc(meta, slots, seen, byid):
              f"即成片 {DROP_BAR * 4 * p:.2f}s / {Dd:.1f}s = **{DROP_BAR / N_BARS * 100:.1f}%**；最后 2 小节渐弱。切点比拍点提前 30 ms。\n")
     L.append("## 2. 选段规则（已更新）\n")
     L.append(f"- 可用段 = 时长 ≥1 秒且不在排除名单（#17、#37、#49、#59、#73），共 **{meta['elig']}** 个，全部入选；"
-             f"每段最多 2 个不重叠窗口，同一段两次出现间隔 ≥8 个镜头（检查：{'通过' if meta['gap_ok'] else '未通过'}）。先用尽每段的第 1 个窗口，再补第 2 个。\n"
+             f"每段最多 {MAX_WIN} 个不重叠窗口，同一段相邻两次出现间隔 ≥8 个镜头（检查：{'通过' if meta['gap_ok'] else '未通过'}）。先用尽每段的第 1 个窗口，再补第 2、3 个。\n"
              f"- 7 对合并保持原决定：{'、'.join(meta['merged'])} 已合并，22/23 分开；窗口不跨合并接缝。\n"
              f"- 闪白任意 1 秒内最多 **{meta['maxflash']}** 次（要求 ≤2），峰值 ≤60%；高潮靠缩放脉冲和色差。"
              f"最长相似连续 **{meta['maxrun']}**（要求 ≤2）。\n"
@@ -448,7 +458,7 @@ def write_doc(meta, slots, seen, byid):
     L.append("| # | 小节 | 段落 | 成片时间 | 段号 | 素材入点→出点 (s) | 拍数 | 速度 | 方向 | 强度 | 转场 | 特效 |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
     for s in slots:
         t0 = s["t"] - 0.03 if s["i"] else 0
-        L.append(f"| {s['i'] + 1} | {s['bar'] + 1} | {s['sec']} | {max(t0, 0):.2f} | {s['seg']}{'（二次）' if s['reuse'] else ''} | "
+        L.append(f"| {s['i'] + 1} | {s['bar'] + 1} | {s['sec']} | {max(t0, 0):.2f} | {s['seg']}{'（复用）' if s['reuse'] else ''} | "
                  f"{s['src_in']:.2f}→{s['src_out']:.2f} | {s['beats']} | {s['speed']} | {s['dir']} | {s['lvl']} | {s['trans']} | {'、'.join(s['fx'])} |")
     L.append("\n## 4. 统一设计\n")
     L.append("- 调色：全片同一套曲线（略提对比、饱和 +8%）。画幅：16:9 完整画面不裁切，左右用同素材放大模糊压暗版填充；9:16 上下同理。预览 30 帧，终片 60 帧（做不到 ≤90MB 则回退 30 帧并告知）。\n"
