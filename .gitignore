@@ -1,0 +1,16 @@
+# 媒体与敏感文件不进仓库
+videos/
+thumbs/
+danmaku/
+*.mp4
+*.flv
+*.m4s
+*.mkv
+*.webm
+*.m4a
+*.wav
+*.jpg
+*.png
+cookies*
+*.cookies
+*.txt.cookies
