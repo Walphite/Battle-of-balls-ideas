@@ -30,8 +30,10 @@ def src_change(t):
 FR=1/30
 fr=[]
 byk={}
-for f in sorted(glob.glob('work/preview/probe/p*.mp4.meta.json'))+sorted(glob.glob('work/preview/probe/q*.mp4.meta.json')):   # q* 覆盖 p*（局部重渲）
-    for e in json.load(open(f))['frames']: byk[e['k']]=e
+GL=(sorted(glob.glob('work/full/?/c_*.mp4.meta.json')) if os.environ.get('GUARD_FULL')=='1' else sorted(glob.glob('work/preview/probe/p*.mp4.meta.json'))+sorted(glob.glob('work/preview/probe/q*.mp4.meta.json')))
+for f in GL:   # q* 覆盖 p*（局部重渲）
+    d=json.load(open(f)); d=d['frames'] if isinstance(d,dict) else d
+    for e in d: byk[e['k']]=e
 fr=[byk[k] for k in sorted(byk)]; k0=fr[0]['k']; K=np.array([e['k'] for e in fr]); m=np.array([e['lum'] for e in fr]); sh=np.array([e['shot'] for e in fr])
 sched=json.load(open('work/glyph_schedule_v5.json'))['events']; E=list(csv.DictReader(open('work/edl.csv',encoding='utf-8')))
 shots=[(int(r['shot']),float(r['t_start']),float(r['t_end']),r['fx'],int(r['flash'])) for r in E]
@@ -80,5 +82,6 @@ for L in (1,2):
             iso.append((fr[i]['t'],L,a,float(seg.mean()),b,[d['kind'] for d in fr[i]['dis']],active_fx(fr[i]['t'])))
 print('孤立 1–2 帧异常（与前后帧差异>20%% 而前后帧彼此相差<10%%）共 %d 处'%len(iso))
 for r in iso: print('  t=%.3f %d帧 前%.3f 中%.3f 后%.3f 溶解=%s 特效=%s'%r)
-json.dump(dict(over30=[(r[0],r[1],r[2],r[4],[d['kind'] for d in r[5]],r[6]) for r in rows],bad=[(r[0],r[1],r[2],[d['kind'] for d in r[5]],r[6]) for r in bad],isolated=iso,frames=len(m)),open('work/guard_report.json','w'),default=float)
+OUT=os.environ.get('GUARD_OUT','work/guard_report.json')
+json.dump(dict(over30=[(r[0],r[1],r[2],r[4],[d['kind'] for d in r[5]],r[6]) for r in rows],bad=[(r[0],r[1],r[2],[d['kind'] for d in r[5]],r[6]) for r in bad],isolated=iso,frames=len(m)),open(OUT,'w'),default=float)
 print('帧数',len(m),'范围 %.2f–%.2f s'%(fr[0]['t'],fr[-1]['t']))

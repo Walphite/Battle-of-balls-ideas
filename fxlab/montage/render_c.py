@@ -252,7 +252,7 @@ class Composer:
 def render_chunk(comp,c0,c1,fn,crf,maxrate,shots):
     W,H=comp.W,comp.H; n0=int(round(c0*FPS)); n1=int(round(c1*FPS))
     enc=['ffmpeg','-v','error','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{W}x{H}','-r',str(FPS),'-i','-','-c:v','libx264','-preset','medium','-pix_fmt','yuv420p','-g',str(FPS*2)]
-    enc+=(['-b:v',maxrate,'-maxrate',maxrate,'-bufsize',maxrate] if maxrate else ['-crf',str(crf)])+['-f','mp4',fn]
+    enc+=(['-crf',str(crf),'-maxrate',maxrate,'-bufsize',str(2*int(maxrate[:-1]))+'k'] if maxrate else ['-crf',str(crf)])+['-f','mp4',fn]
     ep=subprocess.Popen(enc,stdin=subprocess.PIPE) if not PROBE else None; bga=R4.BgaReader(c0,W,H,content_fit=True); plan={}
     for s in shots:
         if s['te']<=c0 or s['t']>=c1: continue
