@@ -7,7 +7,7 @@ import os,sys,json,csv,subprocess
 os.environ.setdefault('EDL','work/edl_v9.csv')
 os.chdir(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,'.')
 import render_c as RC, render_v4 as R4
-FPS=30; NF=8364; CH=300; LEAD_MS=25
+FPS=30; NF=8364; CH=int(os.environ.get('CH','300')); LEAD_MS=25
 SEGF='work/final/segments.json'
 def init():
     os.makedirs('work/final',exist_ok=True)
