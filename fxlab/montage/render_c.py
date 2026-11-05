@@ -193,7 +193,7 @@ class Composer:
                     if c-runs[-1][1]<=int(40*k): runs[-1][1]=c
                     else: runs.append([c,c])
                 for c0,c1 in runs:
-                    title=(c0<0.40*W) and ((r0+r1)/2<0.30*H); st=0.95 if title else 0.75
+                    title=(c0<0.40*W) and ((r0+r1)/2<0.30*H); st=0.95 if title else 0.85
                     A[r0:r1+1,c0:c1+1]=np.maximum(A[r0:r1+1,c0:c1+1],key_ink[r0:r1+1,c0:c1+1]*st); segs.append((r0,r1,c0,c1,st))
         if not segs: return A,np.zeros((H,W),np.float32),np.zeros((H,W),np.float32)
         im=Image.fromarray((K*255).astype(np.uint8)); m=im.filter(ImageFilter.MaxFilter(2*max(1,int(round(2.5*k)))+1)).filter(ImageFilter.GaussianBlur(5*k))
@@ -296,7 +296,7 @@ class Composer:
         return canvas
 def render_chunk(comp,c0,c1,fn,crf,maxrate,shots):
     W,H=comp.W,comp.H; n0=int(round(c0*FPS)); n1=int(round(c1*FPS))
-    enc=['ffmpeg','-v','error','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{W}x{H}','-r',str(FPS),'-i','-','-c:v','libx264','-preset','medium','-pix_fmt','yuv420p','-g',str(FPS*2)]
+    enc=['ffmpeg','-v','error','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{W}x{H}','-r',str(FPS),'-i','-','-c:v','libx264','-preset',os.environ.get('PRESET','medium'),'-pix_fmt','yuv420p','-g',str(FPS*2)]
     enc+=(['-crf',str(crf),'-maxrate',maxrate,'-bufsize',str(2*int(maxrate[:-1]))+'k'] if maxrate else ['-crf',str(crf)])+['-f','mp4',fn]
     ep=subprocess.Popen(enc,stdin=subprocess.PIPE) if not PROBE else None; bga=R4.BgaReader(c0,W,H,content_fit=True); plan={}
     for s in shots:

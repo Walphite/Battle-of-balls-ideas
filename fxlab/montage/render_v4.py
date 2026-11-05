@@ -40,7 +40,9 @@ def load_edl():
         sp=r['speed']; s=dict(n=int(r['shot']),seg=r['seg'],t=float(r['t_start']),te=float(r['t_end']),beats=int(r['beats']),b0=int(r['beat_start']),clip=int(r['clip_id']),
             src_in=float(r['src_in']),src_out=float(r['src_out']),win=float(r['win_pct'])/100,ascii=float(r['ascii_s']),flash=int(r['flash']))
         s['dur']=s['te']-s['t']
-        if sp.startswith('hit'):
+        if sp.startswith('hit2'):
+            p=sp.split(':'); s['mode']='hit2'; s['va']=float(p[1]); s['vb']=float(p[2]); s['tauh']=float(p[3]); s['w']=float(p[4]); s['dip']=float(p[5]); s['peak']=float(p[6]); s['v']=(s['va']+s['vb'])/2
+        elif sp.startswith('hit'):
             p=sp.split(':'); s['mode']='hit'; s['va']=float(p[1]); s['vb']=float(p[2]); s['tauh']=float(p[3]); s['w']=float(p[4]); s['v']=(s['va']+s['vb'])/2
         elif sp.startswith('ramp'):
             p=sp.split(':'); s['mode']='ramp'; s['v']=float(p[1]); kv={k:float(v) for k,v in (x.split('=') for x in p[2:])}; s['hit']=kv['hit']; s['dip']=kv.get('dip',0.5); s['w']=kv.get('w',0.5)
@@ -50,6 +52,10 @@ def load_edl():
 def src_map(s):
     """返回 τ 网格与源时间（相对 src_in）数组。ramp：击中点附近梯形 dip（0.1 坡+0.3 平台+0.1 坡）降到 dip×。"""
     L=s['dur']; dt=1/600; n=int(L/dt)+2; tau=np.arange(n)*dt
+    if s['mode']=='hit2':     # 两段基线速度 + 局部包络 m(τ)（吞噬前 0.4s 慢、吞噬后 0.12s 内加速再回落），与 plan_v9.m_profile 一致
+        Oh=s['tauh']; sm_=lambda x:(lambda y:y*y*(3-2*y))(np.clip(x,0,1)); x=np.clip((tau-(Oh-s['w']))/(2*s['w']),0,1); sm=x*x*(3-2*x)
+        pre=1-(1-s['dip'])*sm_((tau-(Oh-0.4))/0.3); up=s['dip']+(s['peak']-s['dip'])*sm_((tau-Oh)/0.12); down=s['peak']+(1-s['peak'])*sm_((tau-(Oh+0.12))/0.48)
+        m=np.where(tau<=Oh,pre,np.where(tau<Oh+0.12,up,down)); v=m*(s['va']*(1-sm)+s['vb']*sm); src=np.cumsum(v)*dt; src-=src[0]; return tau,src
     if s['mode']=='hit':      # 吞噬前后两段速度，吞噬点两侧 ±w 内平滑缓动（smoothstep），不拆分素材
         x=np.clip((tau-(s['tauh']-s['w']))/(2*s['w']),0,1); sm=x*x*(3-2*x); v=s['va']+(s['vb']-s['va'])*sm; src=np.cumsum(v)*dt; src-=src[0]; return tau,src
     if s['mode']!='ramp': return tau,tau*s['v']
