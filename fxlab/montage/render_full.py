@@ -26,8 +26,10 @@ def done(name): return all(os.path.exists(chunk_path(name,c0)) for c0,c1 in seg_
 def mux(name):
     a,b=SEG[name]; d=f'work/full/{name}'; lst=f'{d}/list.txt'; open(lst,'w').write(''.join(f"file '{os.path.abspath(chunk_path(name,c0))}'\n" for c0,c1 in seg_chunks(name)))
     v=f'{d}/video.mp4'; subprocess.run(['ffmpeg','-v','error','-y','-f','concat','-safe','0','-i',lst,'-c','copy',v],check=True)
-    m=audio_master(); out=f'{DELIV}/preview_{name}.mp4'
-    subprocess.run(['ffmpeg','-v','error','-y','-i',v,'-ss',f'{a/FPS:.6f}','-t',f'{(b-a)/FPS:.6f}','-i',m,'-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-b:a','256k','-aac_pns','0','-aac_is','0','-movflags','+faststart',out],check=True)
+    m=audio_master(); full_aac='work/full/audio_full.m4a'
+    if not os.path.exists(full_aac): subprocess.run(['ffmpeg','-v','error','-y','-i',m,'-c:a','aac','-b:a','256k','-aac_pns','0','-aac_is','0',full_aac],check=True)
+    out=f'{DELIV}/preview_{name}.mp4'      # 各段音频直接复制整轨 AAC 的切片（不单独重编码：分段重编码会使真峰值冲到 +1.8 dBTP）
+    subprocess.run(['ffmpeg','-v','error','-y','-i',v,'-ss',f'{a/FPS:.6f}','-t',f'{(b-a)/FPS:.6f}','-i',full_aac,'-map','0:v','-map','1:a','-c','copy','-movflags','+faststart',out],check=True)
     print('muxed',out,os.path.getsize(out)/1e6,'MB'); return out
 if __name__=='__main__':
     n=sys.argv[1]
