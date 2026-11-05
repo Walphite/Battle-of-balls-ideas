@@ -7,3 +7,7 @@ fxlab/montage/output/*
 !fxlab/montage/input/music/.gitkeep
 !fxlab/montage/work/.gitkeep
 !fxlab/montage/output/.gitkeep
+
+# v2 素材（手工拆好的片段）
+fxlab/montage/input2/*
+!fxlab/montage/input2/.gitkeep
