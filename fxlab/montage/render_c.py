@@ -193,11 +193,12 @@ class Composer:
                     if c-runs[-1][1]<=int(40*k): runs[-1][1]=c
                     else: runs.append([c,c])
                 for c0,c1 in runs:
-                    title=(c0<0.40*W) and ((r0+r1)/2<0.30*H); st=0.95 if title else 0.60
+                    title=(c0<0.40*W) and ((r0+r1)/2<0.30*H); st=0.95 if title else 0.75
                     A[r0:r1+1,c0:c1+1]=np.maximum(A[r0:r1+1,c0:c1+1],key_ink[r0:r1+1,c0:c1+1]*st); segs.append((r0,r1,c0,c1,st))
-        if not segs: return A,np.zeros((H,W),np.float32)
-        m=Image.fromarray((K*255).astype(np.uint8)).filter(ImageFilter.MaxFilter(2*max(1,int(round(2.5*k)))+1)).filter(ImageFilter.GaussianBlur(5*k))
-        return A,np.asarray(m,np.float32)/255.0
+        if not segs: return A,np.zeros((H,W),np.float32),np.zeros((H,W),np.float32)
+        im=Image.fromarray((K*255).astype(np.uint8)); m=im.filter(ImageFilter.MaxFilter(2*max(1,int(round(2.5*k)))+1)).filter(ImageFilter.GaussianBlur(5*k))
+        ring=np.asarray(im.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(0.6*k)),np.float32)/255.0      # ~1.5px 深色描边
+        return A,np.asarray(m,np.float32)/255.0,np.clip(ring-K.astype(np.float32),0,1)
     def sat(self,t):
         """崩坏滤镜：游戏层全局饱和度 S(t)（控制点表 work/sat_curve.csv，线性插值后 ~0.25s 汉宁平滑）"""
         if LEGACY: return 1.0
@@ -259,9 +260,10 @@ class Composer:
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img
         canvas=full*M[...,None]
         if not LEGACY:
-            TA,TH=self.text_layer(key_ink)
-            if self.ink<=0: TA=TA*0; TH=TH*0                                           # 关闭文字层的诊断渲染
-            canvas=canvas*(1-0.55*TH)[...,None]               # 跟字形走的暗晕：游戏层压暗 50%
+            TA,TH,TO=self.text_layer(key_ink)
+            if self.ink<=0: TA=TA*0; TH=TH*0; TO=TO*0                                  # 关闭文字层的诊断渲染
+            canvas=canvas*(1-0.50*TH)[...,None]                                          # 字形暗晕（压暗 50%）
+            canvas=canvas*(1-0.75*TO)[...,None]                                          # 1.5px 深色描边（不透明度 75%）               # 跟字形走的暗晕：游戏层压暗 50%
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img_pre                  # 以下光晕取色用溶解前的画面
         bw=int(40*k); inner=np.zeros((H,W),np.float32); inner[y+bw:y+wh-bw,x+bw:x+ww-bw]=1; win_m=np.zeros((H,W),np.float32); win_m[y:y+wh,x:x+ww]=1; band=win_m-inner
         num=blur_img(full*band[...,None],60*k); den=blur_img(band*255.0,60*k)/255.0
@@ -275,14 +277,17 @@ class Composer:
                 cp_full=np.zeros((H,W),np.float32); cp_full[y:y+wh,x:x+ww]=covpx; Gm=np.maximum(Gm,cp_full*M*0.75)
             canvas=255-(255-canvas)*(255-ink*Gm[...,None])/255
         else:
+            canvas=fx.vignette(canvas,base.get('vignette',0.25)*0.6)                         # 暗角只作用于游戏层+光晕：先于文字层，避免同一文字行随位置变暗
+            hi=np.clip((canvas.mean(2,keepdims=True)-0.68*255)/(0.32*255),0,1)*canvas; canvas=255-(255-canvas)*(255-blur_img(hi,14*k)*0.25)/255   # 泛光同样先于文字层：亮球的泛光不得染亮文字行
+            canvas=canvas*(1-0.9*(key_ink*(TA>0))[...,None])                                 # 字形内游戏层压暗 90%（跟字形走，被字形自身遮住），使行内字色不受亮球影响
             canvas=canvas*(1-TA[...,None])+ink*TA[...,None]                                   # 文字行：正常 alpha 叠加（不用 screen），字色保持 BGA 原色，位于游戏层之上
         # ---- 整帧统一后期
         if rgb_now: canvas=fx.rgb_split(canvas,max(1,int(W*0.006)))
         canvas=fx.scanlines(canvas,base.get('scan',0.1))
         if 'noise' in base: canvas=fx.add_noise(canvas,base['noise'])
-        canvas=fx.vignette(canvas,base.get('vignette',0.25)*0.6)
-        hi=np.clip((canvas.mean(2,keepdims=True)-0.68*255)/(0.32*255),0,1)*canvas
-        canvas=255-(255-canvas)*(255-blur_img(hi,14*k)*0.25)/255
+        if LEGACY: canvas=fx.vignette(canvas,base.get('vignette',0.25)*0.6)
+        if LEGACY:
+            hi=np.clip((canvas.mean(2,keepdims=True)-0.68*255)/(0.32*255),0,1)*canvas; canvas=255-(255-canvas)*(255-blur_img(hi,14*k)*0.25)/255
         if s['flash'] and tau<3*FR:
             a=0.6*math.exp(-tau/0.05); canvas=canvas*(1-a)+255*a
         if t<1.5: canvas*=t/1.5

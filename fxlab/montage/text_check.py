@@ -8,9 +8,10 @@ def bga_frame(t):
 def prev_frame(fn,t):
     p=subprocess.run(['ffmpeg','-v','error','-ss',f'{t:.4f}','-i',fn,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-'],capture_output=True).stdout
     return np.frombuffer(p,np.uint8).reshape(H,W,3).astype(np.float32)
-def find_line(b,kind):
+def find_line(b,kind,top=1.0):
     R,G,B=b[...,0],b[...,1],b[...,2]
-    m=((R>140)&(G<110)&(B<110)) if kind=='red' else ((R>190)&(G>170)&(B<150))
+    m=((R>140)&(G<110)&(B<110)) if kind=='red' else ((R>170)&(G>160)&(B<R-35)&(B>60))
+    m=m.copy(); m[int(top*H):]=False
     rows=np.where(m.sum(1)>=6)[0]
     if not len(rows): return None
     # 最长的连续行带
