@@ -13,6 +13,8 @@ from PIL import Image,ImageDraw,ImageFont,ImageFilter
 class GlyphParams:
     cell_w: int = None            # None → round(W/120)  (legacy)
     cell_h: int = None            # None → round(H/45)   (legacy)
+    cols: int = None              # 给定时：cell_w=round(W/cols)
+    rows: int = None              # 给定时：cell_h=round(H/rows)
     charset: str = " .:-=+*#%@"
     glyph_color: tuple = None     # None → 调用方传入的 BGA 字符前景色
     glyph_gain: float = 0.95
@@ -29,12 +31,14 @@ class GlyphParams:
     restore: float = 0.30; sweep: float = 0.50; sweep_hold: float = 0.10
     final_cover: float = 1.2; final_fade: float = 2.1; final_black: float = 0.5
     @classmethod
-    def spec_look(cls): return cls(noise_scale=4.0,focus_protect=0.8,bg_dim=0.35,bga_reveal=1.0)
+    def spec_look(cls):
+        """用户描述的外观：约 120×41 格（960×540 下 8×13 px）、字符集 . : - = + * #、黑底米黄字符、成团覆盖、最亮主体最晚被覆盖、背景随覆盖变暗"""
+        return cls(cols=120,rows=41,charset=" .:-=+*#",glyph_color=(232,220,176),noise_scale=3.0,focus_protect=0.8,bg_dim=0.5,bga_reveal=1.0)
 
 class GlyphDissolve:
     def __init__(self,W,H,params=None,order=None):
         self.W,self.H=W,H; self.p=params or GlyphParams()
-        self.cw=self.p.cell_w or max(6,round(W/120)); self.ch=self.p.cell_h or max(10,round(H/45))
+        self.cw=self.p.cell_w or (round(W/self.p.cols) if self.p.cols else max(6,round(W/120))); self.ch=self.p.cell_h or (round(H/self.p.rows) if self.p.rows else max(10,round(H/45)))
         self.rng=np.random.default_rng(self.p.seed)
         font=ImageFont.truetype(self.p.font_path,max(10,round(H/45)))
         gl=[]
@@ -137,3 +141,38 @@ class GlyphDissolve:
         dx=np.maximum(np.maximum(x-cx,cx-(x+ww)),0)[None,:]; dy=np.maximum(np.maximum(y-cy,cy-(y+wh)),0)[:,None]
         d=np.sqrt(dx**2+dy**2); mask=((d>0)&(d<=band)).astype(np.float32)*alpha*np.clip(1-d/band*0.6,0,1)   # 由内向外渐隐，避免硬边
         return self.paint(canvas,idx,mask,color,gain=ring_gain)
+
+    # ---------- V5：外部给定覆盖状态（锚点驱动），字符内容按 refresh 步更新（≤12 Hz）
+    def render_state(self,img,key,refresh,color,p=None,front=None,direction='h',rects=None,alive=None,tear_fn=None,tear=False):
+        """p：覆盖比例 0–1（成团+主体保护顺序）；front：扫描式前沿 0–1；rects：局部块（窗口归一化坐标）；alive：收束熄灭进度 0–1（>0 时被熄灭的格子变纯黑）。
+        返回 (img, 覆盖掩码 R×C)。"""
+        h,w=img.shape[:2]; R,C=h//self.ch,w//self.cw
+        ck=(key,refresh)
+        if self._cache.get('k2')!=key: self._cache={'k2':key}
+        if ck not in self._cache:
+            idx,L=self.tiles(img); self._cache={'k2':key,ck:(idx,L)}
+        idx,L=self._cache[ck]
+        if idx.shape!=(R,C):
+            ri=np.minimum((np.arange(R)*idx.shape[0]/R).astype(int),idx.shape[0]-1); ci=np.minimum((np.arange(C)*idx.shape[1]/C).astype(int),idx.shape[1]-1)
+            idx=idx[np.ix_(ri,ci)]; L=L[np.ix_(ri,ci)]
+        out=img
+        if tear and tear_fn is not None: out=tear_fn(out)
+        p_eff=0.0
+        if rects is not None:
+            mask=np.zeros((R,C),np.float32)
+            for (u0,v0,u1,v1) in rects: mask[int(v0*R):max(int(v0*R)+1,int(v1*R)),int(u0*C):max(int(u0*C)+1,int(u1*C))]=1
+            p_eff=1.0
+        elif front is not None:
+            ax=(np.arange(C)[None,:]/C if direction=='h' else np.arange(R)[:,None]/R)*np.ones((R,C)); mask=(ax<front).astype(np.float32); p_eff=front
+        else:
+            p=float(p or 0.0); p_eff=p
+            if p<=0: return out,np.zeros((R,C),np.float32)
+            mask=np.ones((R,C),np.float32) if p>=1 else (self.order_field(R,C,L)<p).astype(np.float32)
+        res=self.paint(out,idx,mask,color,dim_rest=self.p.bg_dim*p_eff if self.p.bg_dim else None)
+        if front is not None and front<1.0:   # 终端光标：前沿一格最重字符
+            cur=(np.abs(ax-front)<(1.0/(C if direction=='h' else R))).astype(np.float32)
+            res=self.paint(res,np.full_like(idx,self.n-1),cur,np.minimum(255,np.asarray(color)*1.2),dim_rest=0.0)
+        if alive is not None and alive>0:
+            dead=(self.order2[:R,:C]<alive).astype(np.float32); dm=np.repeat(np.repeat(dead,self.ch,0),self.cw,1)[...,None]
+            res[:R*self.ch,:C*self.cw]*=(1-dm); mask=mask*(1-dead)
+        return res,mask
