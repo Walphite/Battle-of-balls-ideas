@@ -3,7 +3,7 @@ import os,sys,json,subprocess
 os.environ['EDL']='work/edl_v10.csv'; os.environ.setdefault('PRESET','veryfast')
 os.chdir(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,'.')
 import render_c as RC, render_v4 as R4
-SM=dict(S1=(80,95),S2=(123,140),S3=(192,206),S4=(10.2,13.0))
+SM=dict(S1=(80,95),S2=(123,140),S3=(192,206),S4=(10.2,13.0),PBS=(192,206))
 def run(name):
     t0,t1=SM[name]; sched=json.load(open('work/glyph_schedule_v10.json'))['events']
     if name=='S4':      # 演示：真实相邻镜头 4→5 的边界 M=11.7333，3+3 个八分音符

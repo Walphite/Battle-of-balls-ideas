@@ -9,7 +9,7 @@ from effects.glyph_dissolve import GlyphDissolve,GlyphParams
 FPS=R4.FPS; FR=R4.FR; T=R4.T; ASPECT=R4.ASPECT
 FINE=np.load('work/onsets_fine.npz'); FT=FINE['t']           # 真实起音（校准后）
 PARAMS=dict(fade_width=80.0,spill_width=120.0,spill_strength=0.38)
-PBS_ON=os.environ.get('PBS','1')=='1'
+PBS_ON=os.environ.get('PBS','1')=='1'; PBS0,PBS1=190.4,233.3; PBS_FALLBACK_WHITE=os.environ.get('PBS_WHITE','1')=='1'
 PROBE=os.environ.get('PROBE')=='1'                                    # 1 = 只计算逐帧统计，不编码
 LEGACY=os.environ.get('LEGACY')=='1'                                   # 1 = 左上角清理与整帧变暗修复全部关闭（用于「修改前」对照渲染）
 CROP_MODES=json.load(open('work/crop_modes.json')) if os.path.exists('work/crop_modes.json') else {}
@@ -240,6 +240,46 @@ class Composer:
         if dens>0.06: ink=ink*(1-0.2*Mw[...,None])
         den=max(float(subj.sum()),1.0)
         return TA2,ink,dict(cov_before=round(float((TA*subj).sum()/den),4),cov_after=round(float((TA2*subj).sum()/den),4),dens=round(dens,3),boost=round(boost,2))
+    def pbs2(self,TA,key_ink,b0,ink,img,x,y,wh,ww,M,t,s,ev,tau):
+        """PBS 区（V2）：保持色相，按局部背景明暗在 HSL 里调亮度；暗背景提亮(L>=62%)、亮背景/球体用深色版(L 28%)；窗外 100% 原色。
+        返回 (TA,ink,TH,TO,gmap,meta)：TH=≤2px/≤25% 暗晕(仅暗背景)，TO=1px 白描边(亮背景，30%)，gmap=字形内游戏层压暗系数。"""
+        H,W=self.H,self.W; k=self.k; K=(key_ink>0.5)
+        Lg=np.zeros((H,W),np.float32); Lg[y:y+wh,x:x+ww]=(img@np.array([0.299,0.587,0.114],np.float32))/255.0
+        mx_=img.max(2)/255.0; mn_=img.min(2)/255.0; sat_=(mx_-mn_)/np.maximum(mx_,1e-3)
+        m=((Lg[y:y+wh,x:x+ww]>0.35)|((sat_>0.35)&(mx_>0.45))).astype(np.uint8)*255
+        im=Image.fromarray(m).filter(ImageFilter.MinFilter(2*int(round(3*k))+1)).filter(ImageFilter.MaxFilter(2*int(round(3*k))+1+2*int(round(6*k)))).filter(ImageFilter.GaussianBlur(8*k))
+        subj=np.zeros((H,W),np.float32); subj[y:y+wh,x:x+ww]=np.asarray(im,np.float32)/255.0
+        Lsm=blur_img(np.repeat(Lg[...,None],3,2),34*k)[...,0]; wb=np.clip((Lsm-0.44)/0.14,0,1); wb=wb*wb*(3-2*wb)
+        sm=blur_img(np.repeat(subj[...,None],3,2),20*k)[...,0]; wb=np.maximum(wb,np.clip((sm-0.45)/0.35,0,1)); Mw=(M>0.02).astype(np.float32)*np.clip(M,0,1); wb=wb*Mw
+        # 颜色：HSL 里改亮度（色相不动）
+        mxc=b0.max(2)/255.0; mnc=b0.min(2)/255.0; L0=(mxc+mnc)/2; d=mxc-mnc
+        S0=np.where(d<1e-4,0.0,d/np.maximum(1-np.abs(2*L0-1),1e-4)).clip(0,1)
+        r,g,b=b0[...,0]/255.0,b0[...,1]/255.0,b0[...,2]/255.0
+        hh=np.where(d<1e-4,0.0,np.where(mxc==r,((g-b)/np.maximum(d,1e-4))%6,np.where(mxc==g,(b-r)/np.maximum(d,1e-4)+2,(r-g)/np.maximum(d,1e-4)+4)))/6.0
+        Ld=np.maximum(L0,0.78); Lb=np.full_like(L0,0.31); Sb=np.where(S0>0.25,np.clip(S0,0.55,0.70),S0)
+        Lt=Ld*(1-wb)+Lb*wb; St=S0*(1-wb)+Sb*wb
+        hdeg=hh*360.0; red=((hdeg>=330)|(hdeg<=25))&(S0>0.5)          # 兜底（README 记录）：窗口内红色 PBS 网格改白（暗背景提亮/亮背景深灰），活动单元黄色与窗外红字保留
+        if PBS_FALLBACK_WHITE: St=St*(1-red*Mw)
+        ink_n=ink
+        # 强度
+        dens=float(((key_ink>0.5)*(M>0.5)).sum()/max(1.0,(M>0.5).sum()))
+        A=0.85*(1-wb)+0.45*wb
+        if dens>0.06: A=A*0.85
+        boost=0.0
+        for e in self.sched:
+            if e['kind']=='local' and e['t_s']<=t<e['t_s']+0.25: boost=max(boost,1-(t-e['t_s'])/0.25)
+        for off,typ,nf in ev:
+            if typ=='stutter' and off<=tau<off+0.25: boost=max(boost,1-(tau-off)/0.25)
+        if boost>0: A=A+(1-A)*boost
+        self._pbs_hs=dict(hh=hh,Lt=Lt,St=St,A=A*Mw+(1-Mw),Mw=Mw,L0=L0,S0=S0)     # 强度 A 体现在 HSL 亮度混合里（饱和度不被 alpha 冲淡）
+        TA2=key_ink
+        # 暗晕/描边
+        imk=Image.fromarray((K*255).astype(np.uint8)); halo=np.asarray(imk.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(1.0*k)),np.float32)/255.0
+        TH=halo*(1-wb)*Mw
+        ring=np.asarray(imk.filter(ImageFilter.MaxFilter(3)),np.float32)/255.0; TO=np.clip(ring-K.astype(np.float32),0,1)*wb
+        gmap=(0.9*(1-wb)+0.55*wb)
+        den=max(float((subj*Mw).sum()),1.0); TAraw=TA; TA2c=key_ink*(1.0*(1-Mw)+A*Mw)
+        return TA2,ink_n,TH,TO,gmap,dict(cov_before=round(float((TAraw*subj*Mw).sum()/den),4),cov_after=round(float((TA2c*subj*Mw).sum()/den),4),dens=round(dens,3),boost=round(boost,2),wb_mean=round(float(wb[K].mean()) if K.any() else 0,3))
     def sat_shot(self,shot,t):
         """事件式黑白（V10）：黑白镜头（人声减弱区/收束分级）与溶解硬切后的褪回；由 work/bw_plan.json 给出"""
         if not hasattr(self,'_bw'):
@@ -317,10 +357,14 @@ class Composer:
         if not LEGACY:
             TA,TH,TO=TA0,TH0,TO0
             self._pbs_meta=None
-            if PBS_ON and 192<=t<226: TA,ink,self._pbs_meta=self.pbs(TA,key_ink,ink,img,x,y,wh,ww,M,t,s,ev,tau)
+            pbs_mode=PBS_ON and PBS0<=t<PBS1; gmap=0.9
+            if pbs_mode: TA,ink,TH,TO,gmap,self._pbs_meta=self.pbs2(TA,key_ink,b0,ink,img,x,y,wh,ww,M,t,s,ev,tau)
             if self.ink<=0: TA=TA*0; TH=TH*0; TO=TO*0                                  # 关闭文字层的诊断渲染
-            canvas=canvas*(1-0.50*TH)[...,None]                                          # 字形暗晕（压暗 50%）
-            canvas=canvas*(1-0.75*TO)[...,None]                                          # 1.5px 深色描边（不透明度 75%）               # 跟字形走的暗晕：游戏层压暗 50%
+            if pbs_mode:
+                canvas=canvas*(1-0.25*TH)[...,None]; canvas=canvas*(1-0.30*TO)[...,None]+255.0*0.30*TO[...,None]     # PBS：≤2px/≤25% 暗晕（仅暗背景）+ 1px 白描边 30%（亮背景），无黑描边
+            else:
+                canvas=canvas*(1-0.50*TH)[...,None]                                          # 字形暗晕（压暗 50%）
+                canvas=canvas*(1-0.75*TO)[...,None]                                          # 1.5px 深色描边（不透明度 75%）
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img_pre                  # 以下光晕取色用溶解前的画面
         bw=int(40*k); inner=np.zeros((H,W),np.float32); inner[y+bw:y+wh-bw,x+bw:x+ww-bw]=1; win_m=np.zeros((H,W),np.float32); win_m[y:y+wh,x:x+ww]=1; band=win_m-inner
         num=blur_img(full*band[...,None],60*k); den=blur_img(band*255.0,60*k)/255.0
@@ -336,12 +380,19 @@ class Composer:
         else:
             canvas=fx.vignette(canvas,base.get('vignette',0.25)*0.6)                         # 暗角只作用于游戏层+光晕：先于文字层，避免同一文字行随位置变暗
             hi=np.clip((canvas.mean(2,keepdims=True)-0.68*255)/(0.32*255),0,1)*canvas; canvas=255-(255-canvas)*(255-blur_img(hi,14*k)*0.25)/255   # 泛光同样先于文字层：亮球的泛光不得染亮文字行
-            canvas=canvas*(1-0.9*(key_ink*(TA>0))[...,None])                                 # 字形内游戏层压暗 90%（跟字形走，被字形自身遮住），使行内字色不受亮球影响
-            canvas=canvas*(1-TA[...,None])+ink*TA[...,None]                                   # 文字行：正常 alpha 叠加（不用 screen），字色保持 BGA 原色，位于游戏层之上
+            canvas=canvas*(1-gmap*(key_ink*(TA>0)))[...,None] if pbs_mode else canvas*(1-0.9*(key_ink*(TA>0))[...,None])     # 字形内游戏层压暗（PBS：暗背景 90%、亮背景 55%）
+            if not pbs_mode: canvas=canvas*(1-TA[...,None])+ink*TA[...,None]                  # 文字行：正常 alpha 叠加，字色保持 BGA 原色，位于游戏层之上
         # ---- 整帧统一后期
         if rgb_now: canvas=fx.rgb_split(canvas,max(1,int(W*0.006)))
         canvas=fx.scanlines(canvas,base.get('scan',0.1))
         if 'noise' in base: canvas=fx.add_noise(canvas,base['noise'])
+        if not LEGACY and pbs_mode:                                                          # PBS：文字在整帧后期之后叠加（色相不被色差/噪点改变），扫描线对文字压暗 ≤10%
+            hs=self._pbs_hs; Mx=canvas.max(2)/255.0; Mn=canvas.min(2)/255.0; Lu=(Mx+Mn)/2
+            Lp=hs['A']*hs['Lt']+(1-hs['A'])*Lu; Lp=np.where(hs['Mw']>0.02,Lp,hs['L0']); St_=np.where(hs['Mw']>0.02,hs['St'],hs['S0'])
+            C=(1-np.abs(2*Lp-1))*St_; hh_=hs['hh']; X=C*(1-np.abs((hh_*6)%2-1)); m0=Lp-C/2; hi_=(hh_*6).astype(int)%6
+            tc=np.stack([np.choose(hi_,[C,X,0*C,0*C,X,C])+m0,np.choose(hi_,[X,C,C,X,0*C,0*C])+m0,np.choose(hi_,[0*C,0*C,X,C,C,X])+m0],-1)*255.0
+            tc=np.where(hs['Mw'][...,None]>0.02,tc*hs['Mw'][...,None]+ink*(1-hs['Mw'][...,None]),ink)
+            tcol=tc*(1-min(base.get('scan',0.1),0.10)*fx.scan[:H]); canvas=canvas*(1-TA[...,None])+tcol*TA[...,None]
         if LEGACY: canvas=fx.vignette(canvas,base.get('vignette',0.25)*0.6)
         if LEGACY:
             hi=np.clip((canvas.mean(2,keepdims=True)-0.68*255)/(0.32*255),0,1)*canvas; canvas=255-(255-canvas)*(255-blur_img(hi,14*k)*0.25)/255
