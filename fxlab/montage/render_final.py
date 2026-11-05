@@ -22,13 +22,14 @@ def cpath(res,part,c): return f'work/final/{res}/p{part}/c_{c:05d}.mp4'
 def chunks(res,part):
     a,b=seg(part); H=int(res); shots=R4.load_edl(); sched=json.load(open('work/glyph_schedule_v5.json'))['events']; comp=RC.Composer(H*16//9,H,sched)
     os.makedirs(f'work/final/{res}/p{part}',exist_ok=True)
-    for c0 in range(a,b,CH):
+    rng=list(range(a,b,CH)); rng=rng[::-1] if os.environ.get('REV')=='1' else rng
+    for c0 in rng:
         c1=min(b,c0+CH); fn=cpath(res,part,c0)
         if os.path.exists(fn): continue
         comp.meta=[]
-        if H<=540: RC.render_chunk(comp,c0/FPS,c1/FPS,fn+'.part.mp4',22,'2200k',shots)
-        else: RC.render_chunk(comp,c0/FPS,c1/FPS,fn+'.part.mp4',14,None,shots)
-        json.dump(comp.meta,open(fn+'.meta.json','w'),default=float); os.replace(fn+'.part.mp4',fn); print('chunk',res,part,c0,c1,flush=True)
+        if H<=540: RC.render_chunk(comp,c0/FPS,c1/FPS,fn+f'.part{os.getpid()}.mp4',22,'2200k',shots)
+        else: RC.render_chunk(comp,c0/FPS,c1/FPS,fn+f'.part{os.getpid()}.mp4',14,None,shots)
+        json.dump(comp.meta,open(fn+'.meta.json','w'),default=float); os.replace(fn+f'.part{os.getpid()}.mp4',fn); print('chunk',res,part,c0,c1,flush=True)
 def status(res):
     for p in (1,2,3):
         a,b=seg(p); n=len(range(a,b,CH)); d=sum(1 for c in range(a,b,CH) if os.path.exists(cpath(res,p,c))); print(res,'part',p,d,'/',n)

@@ -36,6 +36,8 @@ for e in full:
     for j in range(n):
         if t_old[j]-0.01<=a<t_old[j+1]+0.01 or t_old[j]-0.01<=b<=t_old[j+1]+0.01: fixed|={j,j+1}
 # ---------- 规则区 Viterbi（同 v7）
+def feas_u(c,O,lo=0.8,hi=1.25):
+    D=float(CL[c]['dur']); return max(D-0.2,0.5)/O<=hi and D/O>=lo
 cost=lambda k:abs(float(BT[k])-nearest(strong2,float(BT[k])))
 cand=[[0] if (j in fixed or not in_rule(t_old[j])) else [-1,0,1] for j in range(n+1)]
 dp=[{d:0.0 for d in cand[0]}]; bp=[{}]
@@ -46,6 +48,7 @@ for j in range(1,n+1):
         for dp_,v in dp[j-1].items():
             nbk=kj-(K[j-1]+dp_)
             if nbk<5 or nbk>14: continue
+            if nbk!=(K[j]-K[j-1]) and OLD[j-1]['seg']!='outro' and not feas_u(int(OLD[j-1]['clip_id']),PER*nbk): continue
             if v+cj<best: best=v+cj;arg=dp_
         if arg is not None: cur[d]=best;back[d]=arg
     dp.append(cur);bp.append(back)
@@ -155,7 +158,7 @@ for reg in regions:
         for b_,c in enumerate(cl):
             if abs(STR[c]-STR[slot_clip[k]])>STR_THR+1e-9: continue
             e=eval_slot(k,c,Tcur,frozen,assign); arc=LAMBDA*abs(STR[c]-STR[slot_clip[k]])
-            W[a_,b_]=(-(1000-100*e[0])+arc) if e else ((0.0 if c==slot_clip[k] else 0.5)+arc)
+            W[a_,b_]=(-(1000-100*e[0])+arc) if e else (((0.0 if c==slot_clip[k] else 0.5)+arc) if (c==slot_clip[k] or feas_u(c,Tcur[k+1]-Tcur[k])) else BIG)
     if time.time()-T0>900:            # 超过 15 分钟：退回贪心
         greedy_used=True; col=np.arange(m_)
     else: col=hungarian(W)
@@ -190,7 +193,7 @@ for i,r in enumerate(OLD):
         old_sp=r['speed']; ramp=old_sp.startswith('ramp') and c==slot_clip[i]; seg=r['seg']
         if seg=='outro': new.update(src_in=r['src_in'],src_out=r['src_out'],speed=f"{(float(r['src_out'])-float(r['src_in']))/O:.4f}")
         else:
-            d=min(max(D-0.1,max(D-0.2,0.5)),D); v=float(np.clip(d/O,0.85,1.15)); d=min(v*O,D); tr=(D-d)/2
+            d=min(max(O,max(D-0.2,0.5)),D); tr=(D-d)/2          # d∈[D−0.2,D]：首尾各修剪 ≤0.1 s，速度 d/O 由可行性保证落在 0.8–1.25
             new.update(src_in=f'{tr:.3f}',src_out=f'{D-tr:.3f}',speed=f'{d/O:.4f}')
         unmapped.append((i,c))
     rows.append(new)

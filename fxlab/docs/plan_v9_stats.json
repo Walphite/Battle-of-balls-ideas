@@ -1,13 +1,13 @@
 {
  "total": 108,
- "mapped": 63,
- "coverage": 0.583,
+ "mapped": 64,
+ "coverage": 0.593,
  "low_conf_threshold": 0.0,
  "swapped_slots": 2,
- "boundary_shifted": 4,
+ "boundary_shifted": 5,
  "shifts": {
   "(0, 0)": 59,
-  "(-1, 0)": 1,
+  "(-1, 0)": 2,
   "(0, 1)": 1,
   "(1, 0)": 1,
   "(0, -1)": 1
@@ -15,7 +15,7 @@
  "tier": {
   "2": 19,
   "1": 32,
-  "3": 12
+  "3": 13
  },
  "unmapped": [
   {
@@ -99,14 +99,9 @@
    "reason": "±0.45 秒内无起音"
   },
   {
-   "clip_id": 20,
-   "shot": 24,
-   "reason": "速度越界（0.8–1.25×）"
-  },
-  {
    "clip_id": 44,
    "shot": 25,
-   "reason": "速度越界（0.8–1.25×）"
+   "reason": "±0.45 秒内无起音"
   },
   {
    "clip_id": 6,
@@ -245,9 +240,9 @@
   }
  ],
  "reasons": {
-  "±0.45 秒内无起音": 26,
+  "±0.45 秒内无起音": 27,
   "吞噬点太靠头/尾": 4,
-  "速度越界（0.8–1.25×）": 15
+  "速度越界（0.8–1.25×）": 13
  },
  "disp_dev_ms": {
   "max": 16.6,
@@ -362,5 +357,5 @@
   ]
  ],
  "greedy_fallback": false,
- "solve_seconds": 3.2
+ "solve_seconds": 3.4
 }
