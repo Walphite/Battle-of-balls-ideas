@@ -178,6 +178,36 @@ def local_events(times,nblocks):
         out.append(dict(kind='local',t=t,dur=round(dur,4),rects=[rect() for _ in range(nblocks[i%len(nblocks)])],next_trigger=None if nxt>1e8 else nxt))
     return out
 loc=local_events(corp,[1,2,3])+local_events(frag,[1,2])
+
+def stutter_windows():
+    out=[]
+    for i,sh in enumerate(shots):
+        for tok in sh['fx']:
+            m=re.match(r'stutter:(\d+)f@([\d.]+)',tok)
+            if m: t=shot_start_t(i)+float(m.group(2)); out.append((t,t+int(m.group(1))/FPS,i,tok))
+    return out
+def all_boundaries(): return sorted({shot_start_t(i) for i in range(len(shots))}|{shot_end_t(i) for i in range(len(shots))})
+ANCH_T=sorted(a['t_ms']/1000 for a in AN['anchors'])
+dropped_stutter=[]
+def resolve_conflicts(evs):
+    """局部溶解 vs 定格重复/硬切（±2 帧内不得同组）。
+    定格重复冲突：局部溶解必须在起音精确时刻出现（锚点对位规则），所以保留局部溶解、去掉该处的定格重复（rgb 色差保留）；
+    硬切冲突：局部溶解推迟到下一个锚点（任一级，且与其它局部事件间隔 ≥0.3s）。"""
+    pad=2/FPS; moved=[]; bd=all_boundaries()
+    taken=[e['t'] for e in evs]
+    for e in evs:
+        a,b=e['t']-pad,e['t']+e['dur']+pad
+        for (w0,w1,i,tok) in stutter_windows():
+            if not(w1<a or w0>b):
+                shots[i]['fx'].remove(tok); dropped_stutter.append((round(w0,3),tok,shots[i]['n']))
+        if any(a<=x<=b for x in bd):
+            t0=e['t']; taken=[x for x in taken if x!=t0]
+            for an in [x for x in ANCH_T if x>t0]:
+                if any(abs(an-x)<0.3 for x in taken): continue
+                end=next(shot_end_t(j) for j in range(len(shots)) if shot_start_t(j)-1e-6<=an<shot_end_t(j)); d=min(next_grid(an)-an,0.25,end-an-0.01)
+                if d>=2/FPS and not any(an-pad<=x<=an+d+pad for x in bd):
+                    e['t_orig']=t0; e['t']=round(an,4); e['dur']=round(d,4); e['pushed']=True; moved.append((round(t0,3),round(an,3))); taken.append(an); break
+    return moved
 # ---------- 重定时 EDL（先把锚点边界吸附，再写出）
 def shot_time(i): return shot_start_t(i),shot_end_t(i)
 warn=[]
@@ -230,6 +260,7 @@ def ser(ev):
     if k=='final':
         return dict(kind='final',variant='收束',A0=ev['A0'],anchor_ids=[ev['anchor']['id'] if ev.get('anchor') else None],t=ev['A0']-0.5,dur=ev['t_end']-(ev['A0']-0.5),t_end=ev['t_end'],shot=ev['i']+1,tier=ev['tier'],note=ev['note'])
     return ev
+moved_loc=resolve_conflicts(loc); print('局部溶解因硬切推迟到下一锚点：',moved_loc,'；去掉重叠的定格重复',len(dropped_stutter),'处')
 sched=[ser(e) for e in events]+loc; sched.sort(key=lambda e:e['t'])
 json.dump(dict(events=sched,bga_accent=bga_rows,warn=warn,delta_ms=DELTA*1000),open('work/glyph_schedule_v5.json','w'),ensure_ascii=False,indent=0)
 # ---------- 样 E：与 sample_D 同一段 EDL 真实镜头 25–29；在这段里求解 4 个变体
@@ -254,6 +285,7 @@ for t,s in cand:
     if len(pick)==3: break
 pick.sort(); used_rect.clear()
 locE=local_events(pick,[1,2,3]); 
+moved_E=resolve_conflicts(locE); print('E 内冲突：',moved_E)
 schedE=[ser(e) for e in evE]+locE; schedE.sort(key=lambda e:e['t'])
 # E 的边界吸附也要写入 EDL（E 求解后覆盖已写出的 edl.csv 前，需重新写）
 def write_edl():

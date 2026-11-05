@@ -9,6 +9,47 @@ from effects.glyph_dissolve import GlyphDissolve,GlyphParams
 FPS=R4.FPS; FR=R4.FR; T=R4.T; ASPECT=R4.ASPECT
 FINE=np.load('work/onsets_fine.npz'); FT=FINE['t']           # 真实起音（校准后）
 PARAMS=dict(fade_width=80.0,spill_width=120.0,spill_strength=0.38)
+PROBE=os.environ.get('PROBE')=='1'                                    # 1 = 只计算逐帧统计，不编码
+LEGACY=os.environ.get('LEGACY')=='1'                                   # 1 = 左上角清理与整帧变暗修复全部关闭（用于「修改前」对照渲染）
+CROP_MODES=json.load(open('work/crop_modes.json')) if os.path.exists('work/crop_modes.json') else {}
+BLUEGRAY=np.array([110.0,125.0,150.0],np.float32)                       # BGA 字符蓝灰（图标终端化的目标色相）
+def eff_tau(s,tau):
+    """内容时间 τ'：定格重复（stutter）= 暂停，而不是回放后跳帧——每个已结束的 stutter 让内容时间落后其时长；stutter 进行中内容时间停在其起点。
+    （旧实现在释放时内容向前跳 N 帧，素材自身快速变暗/变亮时就变成整帧亮度突变。）"""
+    if LEGACY: 
+        for off,typ,nf in s['events']:
+            if typ=='stutter' and off<=tau<off+nf*FR: return off
+        return tau
+    lag=0.0
+    for off,typ,nf in sorted(e for e in s['events'] if e[1]=='stutter'):
+        d=nf*FR
+        if tau>=off+d: lag+=d
+        elif tau>=off: return off-lag
+    return tau-lag
+def src_index_c(s,tau):
+    tg,src=s['_map']; st=float(np.interp(eff_tau(s,tau),tg,src)); return max(0,int(st*float(R4.CLIPS[s['clip']]['fps'])+1e-6))
+def crop_for(s):
+    """该镜头的顶部裁切比例与是否用黑色渐变：hard9（整段没有球体/文字进入 6–9% 带）→ 硬裁 9%；否则 6% + 窗口顶部 0–9% 黑色渐变"""
+    if LEGACY: return 0.06,False
+    m=CROP_MODES.get(str(s['clip']),{}).get('mode','grad6'); return (0.09,False) if m=='hard9' else (0.06,True)
+def decode_frames2(s,wh,need_idx,crop):
+    r=R4.CLIPS[s['clip']]; ct=int(R4.SRC_H*crop)//2*2; ch=R4.SRC_H-ct; ww=int(round(wh*R4.SRC_W/ch))//2*2
+    vf=f'crop=iw:{ch}:0:{ct},scale={ww}:{wh}:flags=bicubic'; need=s['src_out']-s['src_in']+0.1
+    p=subprocess.Popen(['ffmpeg','-v','error','-ss',f"{s['src_in']:.3f}",'-t',f'{need:.3f}','-i','input2/clips/'+r['file'],'-an','-vf',vf,'-f','rawvideo','-pix_fmt','rgb24','-'],stdout=subprocess.PIPE)
+    fs=ww*wh*3; out={}; i=0; mx=max(need_idx) if need_idx else 0; want=set(need_idx); last=None
+    while True:
+        b=p.stdout.read(fs)
+        if len(b)<fs: break
+        if i in want: out[i]=np.frombuffer(b,np.uint8).reshape(wh,ww,3)
+        last=b; i+=1
+        if i>mx: break
+    try: p.stdout.close(); p.kill()
+    except Exception: pass
+    if last is not None:
+        lf=np.frombuffer(last,np.uint8).reshape(wh,ww,3)
+        for k in want:
+            if k not in out: out[k]=lf
+    return out,ww
 def smooth01(x): x=np.clip(x,0,1); return x*x*(3-2*x)
 def blur_img(a,radius,scale=4):
     h,w=a.shape[:2]; sm=Image.fromarray(np.clip(a,0,255).astype(np.uint8)).resize((max(2,w//scale),max(2,h//scale)),Image.BILINEAR)
@@ -25,7 +66,11 @@ def clean_bga(b):
 class Composer:
     def __init__(self,W,H,schedule,params=None,ink=1.0):
         self.W,self.H=W,H; self.k=W/960.0; self.fx=R4.FX(W,H); self.P=dict(PARAMS,**(params or {})); self.ink=ink
-        self.gd=GlyphDissolve(W,H,GlyphParams.spec_look()); self.sched=schedule; self.meta=[]; self.cc={}
+        gp=GlyphParams.spec_look()
+        if os.environ.get('GD_BGDIM') is not None: gp.bg_dim=float(os.environ['GD_BGDIM'])          # 诊断开关
+        self.gd=GlyphDissolve(W,H,gp); self.meta=[]; self.cc={}
+        off=set(filter(None,os.environ.get('GD_OFF','').split(',')))                                   # 诊断开关：关闭某类事件
+        self.sched=[e for e in schedule if e['kind'] not in off]
         for e in self.sched: self._prep(e)
     def _prep(self,e):
         k=e['kind']; e['id']=e.get('id',f"{k}@{e.get('A0',e.get('t',0)):.3f}")
@@ -57,8 +102,8 @@ class Composer:
                 S=e['S']; dt=(e['A1f']-e['A0'])/S; j=min(S,int((t-e['A0'])/dt+1e-9)); return dict(p=(j+1)/(S+1),refresh=j)
             prog=min(1.0,(t-e['A1f'])/2.1); return dict(p=1.0,alive=prog,refresh=100+int((t-e['A1f'])/0.1))
     # ---- 几何、渐变、光晕（按分辨率与余量缩放）
-    def geometry(self,win):
-        H,W,k=self.H,self.W,self.k; wh=int(round(H*min(win,1.0)))//2*2; ww=min(int(round(wh*ASPECT))//2*2,W); return wh,ww,(W-ww)//2,(H-wh)//2
+    def geometry(self,win,crop=0.06):
+        H,W,k=self.H,self.W,self.k; wh=int(round(H*min(win,1.0)))//2*2; asp=R4.SRC_W/(R4.SRC_H-int(R4.SRC_H*crop)//2*2); ww=min(int(round(wh*asp))//2*2,W); return wh,ww,(W-ww)//2,(H-wh)//2
     def fields(self,wh,ww,x,y):
         key=(wh,ww,x,y,round(self.P['fade_width']),round(self.P['spill_width']))
         if key in self.cc: return self.cc[key]
@@ -87,14 +132,58 @@ class Composer:
         fall=np.clip(1-d,0,1).astype(np.float32); fall[inside]=0
         if len(self.cc)>60: self.cc.clear()
         self.cc[key]=(M,Cn,fall); return self.cc[key]
+    # ---- 左上角清理
+    def terminalize_icons(self,img,crop,wh,ww):
+        """左侧按钮柱里的喇叭/麦克风/白色圆钮/下拉箭头：去饱和 70%、亮度 ×0.6、向 BGA 蓝灰靠拢；闪电键、摇杆、小地图不动"""
+        key=('ico',wh,ww,crop)
+        if key not in self.cc:
+            v=(np.arange(wh,dtype=np.float32)+0.5)/wh; u=(np.arange(ww,dtype=np.float32)+0.5)/ww; m=np.zeros((wh,ww),np.float32)
+            for yc in (0.020,0.098,0.205,0.300):
+                yy=yc if crop>=0.09 else (0.03+0.91*yc)/0.94                           # 6% 裁切时图标位置下移
+                rx=0.034; ry=rx*ww/wh; d=np.sqrt(((u[None,:]-0.075)/rx)**2+((v[:,None]-yy)/ry)**2); m=np.maximum(m,1-smooth01((d-0.85)/0.40))
+            self.cc[key]=m
+        m=self.cc[key][...,None]
+        L=img.mean(2,keepdims=True); c=(L+0.30*(img-L))*0.6; c=c*0.65+0.35*(L*0.6)*(BLUEGRAY/BLUEGRAY.mean())
+        return img*(1-m)+c*m
+    def finish_game(self,img,crop,grad):
+        """游戏层：左上角黑色渐变（角落 60%，到窗宽 35%、窗高 32% 为 0）+ 顶部黑色渐变（grad6 镜头：窗高 0–9% 内 100%→0；hard9 只在顶部 1.5% 内收口）"""
+        wh,ww=img.shape[:2]; key=('cor',wh,ww,grad)
+        if key not in self.cc:
+            u=(np.arange(ww,dtype=np.float32)+0.5)/ww; v=(np.arange(wh,dtype=np.float32)+0.5)/wh
+            r=np.sqrt((u[None,:]/0.35)**2+(v[:,None]/0.32)**2); a=0.6*(1-smooth01(r))
+            top=1-np.clip(v/(0.09 if grad else 0.015),0,1); a=1-(1-a)*(1-top[:,None]); self.cc[key]=a.astype(np.float32)
+        return img*(1-self.cc[key])[...,None]
+    def title_region(self):
+        key=('title',self.W,self.H)
+        if key not in self.cc:
+            xx=np.arange(self.W,dtype=np.float32)[None,:]/(0.40*self.W); yy=np.arange(self.H,dtype=np.float32)[:,None]/(0.30*self.H)
+            self.cc[key]=((1-smooth01((xx-0.85)/0.15))*(1-smooth01((yy-0.85)/0.15))).astype(np.float32)
+        return self.cc[key]
+    def text_substrate(self,key_ink):
+        """左上区域内：由 BGA 亮度键提取每行文字的外接框，外扩 12px，高斯软边 ~8px → 衬底遮罩 (H,W)∈[0,1]"""
+        H,W,k=self.H,self.W,self.k; rh,rw=int(0.30*H),int(0.40*W); kr=key_ink[:rh,:rw]>0.5
+        hit=np.where(kr.sum(1)>=max(2,int(2*k)))[0]; sm=np.zeros((H//4,W//4),np.float32)
+        if len(hit):
+            groups=[[hit[0],hit[0]]]
+            for r in hit[1:]:
+                if r-groups[-1][1]<=int(4*k)+1: groups[-1][1]=r
+                else: groups.append([r,r])
+            pad=int(round(12*k))
+            for r0,r1 in groups:
+                cols=np.where(kr[r0:r1+1].any(0))[0]; c0,c1=cols.min(),cols.max()
+                sm[max(0,(r0-pad))//4:(r1+pad)//4+1,max(0,(c0-pad))//4:(c1+pad)//4+1]=1
+        if sm.max()<=0: return np.zeros((H,W),np.float32)
+        im=Image.fromarray((sm*255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(max(0.5,8*k/4))).resize((W,H),Image.BILINEAR)
+        return np.asarray(im,np.float32)/255.0
     # ---- 单帧
     def frame(self,kf,t,shots,s,plan,cache,bga):
         W,H,k=self.W,self.H,self.k; fx=self.fx; tau=t-s['t']; base=s['base']; ev=s['events']
-        win=R4.interp_win(shots,s,t); wh,ww,x,y=self.geometry(win)
+        crop,grad=crop_for(s)
+        win=R4.interp_win(shots,s,t); wh,ww,x,y=self.geometry(win,crop)
         key=(s['n'],wh)
-        if key not in cache: cache.clear(); cache[key]=R4.decode_frames(s,wh,plan[s['n']])
+        if key not in cache: cache.clear(); cache[key]=decode_frames2(s,wh,plan[s['n']],crop)
         frames,ww=cache[key]; x=(W-ww)//2
-        img=frames[R4.src_index(s,tau)].astype(np.float32)
+        img=frames[src_index_c(s,tau)].astype(np.float32)
         # ---- 窗内：自然色彩（不调色、不降饱和）；形变类特效
         if 'contrast' in base: piv=img.mean(); img=piv+(img-piv)*base['contrast']
         if 'dim' in base: img=img*base['dim']
@@ -110,16 +199,20 @@ class Composer:
             elif typ=='tear': img=fx.tear(img)
             elif typ=='bga_accent': accent_now=True
         if 'shake' in base: img=fx.shake(img,base['shake'])
+        if not LEGACY: img=self.terminalize_icons(img,crop,wh,ww)
+        img_pre=img.copy()                                                       # 溶解前的游戏层：光晕颜色取自它（背景变暗不得作用于 BGA 层）
         # ---- 字符溶解（锚点驱动；字符色 = 米黄）
         covpx=None; act=[]; col=np.asarray(self.gd.p.glyph_color,np.float32)
         for e in self.sched:
             st=self.state(e,t)
             if st is None: continue
-            img,m=self.gd.render_state(img,e['id'],st['refresh'],col,p=st.get('p'),front=st.get('front'),direction=st.get('direction','h'),rects=st.get('rects'),alive=st.get('alive'),tear_fn=fx.tear,tear=st.get('tear',False))
+            img,m=self.gd.render_state(img,e['id'],st['refresh'],col,p=st.get('p'),front=st.get('front'),direction=st.get('direction','h'),rects=st.get('rects'),alive=st.get('alive'),tear_fn=fx.tear,tear=st.get('tear',False),no_dim=(not LEGACY and st.get('rects') is not None))
             cp=np.repeat(np.repeat(m,self.gd.ch,0),self.gd.cw,1); full=np.zeros((wh,ww),np.float32); full[:cp.shape[0],:cp.shape[1]]=cp[:wh,:ww]
             covpx=full if covpx is None else np.maximum(covpx,full)
             act.append(dict(id=e['id'],kind=e['kind'],p=round(float(st.get('p',st.get('front',1.0) if 'front' in st else 1.0)),3),refresh=st['refresh']))
         img=np.clip(img,0,255)
+        if not LEGACY: img=self.finish_game(img,crop,grad); img_pre=self.finish_game(img_pre,crop,grad)
+        else: img_pre=img
         # ---- BGA：原始背景（纯黑）+ 字符墨水
         b=bga.read().astype(np.float32); b,key_ink=clean_bga(b)
         j=np.searchsorted(FT,t); last=FT[j-1] if j>0 else -9; pulse=math.exp(-(t-last)/0.12) if t-last<0.4 else 0
@@ -129,6 +222,8 @@ class Composer:
         # ---- 合成：窗口内容向黑渐变；外溢光晕（取自画面边缘 ~40px 平均色）
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img
         canvas=full*M[...,None]
+        if not LEGACY: canvas=canvas*(1-0.6*self.text_substrate(key_ink))[...,None]       # BGA 文字行衬底：游戏层压暗 60%
+        full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img_pre                  # 以下光晕取色用溶解前的画面
         bw=int(40*k); inner=np.zeros((H,W),np.float32); inner[y+bw:y+wh-bw,x+bw:x+ww-bw]=1; win_m=np.zeros((H,W),np.float32); win_m[y:y+wh,x:x+ww]=1; band=win_m-inner
         num=blur_img(full*band[...,None],60*k); den=blur_img(band*255.0,60*k)/255.0
         colf=np.clip(num/np.maximum(den[...,None],0.03),0,255)
@@ -139,6 +234,7 @@ class Composer:
         Gm=(1-M)*0.50+M*(0.25-0.17*Cn)
         if covpx is not None:
             cp_full=np.zeros((H,W),np.float32); cp_full[y:y+wh,x:x+ww]=covpx; Gm=np.maximum(Gm,cp_full*M*0.75)
+        if not LEGACY: Gm=np.maximum(Gm,0.92*self.title_region())                           # 左上约 40%×30%：BGA 字符 85–100%
         canvas=255-(255-canvas)*(255-ink*Gm[...,None])/255
         # ---- 整帧统一后期
         if rgb_now: canvas=fx.rgb_split(canvas,max(1,int(W*0.006)))
@@ -151,30 +247,37 @@ class Composer:
             a=0.6*math.exp(-tau/0.05); canvas=canvas*(1-a)+255*a
         if t<1.5: canvas*=t/1.5
         if t>T-2.68: canvas*=max(0,(T-t)/2.68)
-        self.meta.append(dict(k=kf,t=round(t,4),shot=s['n'],x=x,y=y,ww=ww,wh=wh,dis=act))
-        return np.clip(canvas,0,255)
+        canvas=np.clip(canvas,0,255); self.meta.append(dict(k=kf,t=round(t,4),shot=s['n'],x=x,y=y,ww=ww,wh=wh,dis=act,lum=round(float(canvas.mean()/255),4)))
+        return canvas
 def render_chunk(comp,c0,c1,fn,crf,maxrate,shots):
     W,H=comp.W,comp.H; n0=int(round(c0*FPS)); n1=int(round(c1*FPS))
     enc=['ffmpeg','-v','error','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{W}x{H}','-r',str(FPS),'-i','-','-c:v','libx264','-preset','medium','-pix_fmt','yuv420p','-g',str(FPS*2)]
     enc+=(['-b:v',maxrate,'-maxrate',maxrate,'-bufsize',maxrate] if maxrate else ['-crf',str(crf)])+['-f','mp4',fn]
-    ep=subprocess.Popen(enc,stdin=subprocess.PIPE); bga=R4.BgaReader(c0,W,H,content_fit=True); plan={}
+    ep=subprocess.Popen(enc,stdin=subprocess.PIPE) if not PROBE else None; bga=R4.BgaReader(c0,W,H,content_fit=True); plan={}
     for s in shots:
         if s['te']<=c0 or s['t']>=c1: continue
         tau,src=R4.src_map(s); s['_map']=(tau,src)
-        plan[s['n']]=sorted({R4.src_index(s,(kk+0.5)*FR-s['t']) for kk in range(n0,n1) if s['t']<=(kk+0.5)*FR<s['te']})
+        plan[s['n']]=sorted({src_index_c(s,(kk+0.5)*FR-s['t']) for kk in range(n0,n1) if s['t']<=(kk+0.5)*FR<s['te']})
     cache={}
     for kf in range(n0,n1):
-        t=(kf+0.5)*FR; s=next(x for x in shots if x['t']<=t<x['te'])
-        ep.stdin.write(comp.frame(kf,t,shots,s,plan,cache,bga).astype(np.uint8).tobytes())
-    ep.stdin.close(); ep.wait(); bga.close()
+        t=(kf+0.5)*FR; s=next((x for x in shots if x['t']<=t<x['te']),None)
+        if s is None:                       # 第一个镜头之前 / 最后一个镜头之后：纯黑
+            bga.read(); fr=np.zeros((H,W,3),np.float32); comp.meta.append(dict(k=kf,t=round(t,4),shot=0,x=0,y=0,ww=0,wh=0,dis=[],lum=0.0))
+        else: fr=comp.frame(kf,t,shots,s,plan,cache,bga)
+        if ep: ep.stdin.write(fr.astype(np.uint8).tobytes())
+    if ep: ep.stdin.close(); ep.wait()
+    bga.close()
 def render(t0,t1,H,out,schedule,params=None,ink=1.0,crf=20,maxrate=None,chunk=10.0,snap=False):
     W=H*16//9; shots=R4.load_edl(); comp=Composer(W,H,schedule,params,ink)
     if snap: t0,t1=R4.snap_bounds(shots,t0,t1); print('snapped',t0,t1)
     d=out+'.chunks'; os.makedirs(d,exist_ok=True); chunks=[]; c0=t0
     while c0<t1-1e-6:
         c1=min(t1,c0+chunk); fn=os.path.join(d,f'c_{int(round(c0*1000)):07d}.mp4'); chunks.append(fn)
-        if not os.path.exists(fn): render_chunk(comp,c0,c1,fn+'.part.mp4',crf,maxrate,shots); os.replace(fn+'.part.mp4',fn)
+        if PROBE: render_chunk(comp,c0,c1,fn,crf,maxrate,shots)
+        elif not os.path.exists(fn): render_chunk(comp,c0,c1,fn+'.part.mp4',crf,maxrate,shots); os.replace(fn+'.part.mp4',fn)
         c0=c1
+    if PROBE:
+        json.dump(dict(t0=t0,t1=t1,W=W,H=H,sched=comp.sched,frames=comp.meta),open(out+'.meta.json','w'),default=float); return out,t0,t1
     lst=os.path.join(d,'list.txt'); open(lst,'w').write(''.join(f"file '{os.path.abspath(f)}'\n" for f in chunks))
     af=f'atrim=start={t0}:end={t1},asetpts=PTS-STARTPTS,'
     if t0<0.01: af+='afade=t=in:st=0:d=1.5,'

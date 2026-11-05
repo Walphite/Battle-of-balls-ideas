@@ -143,7 +143,7 @@ class GlyphDissolve:
         return self.paint(canvas,idx,mask,color,gain=ring_gain)
 
     # ---------- V5：外部给定覆盖状态（锚点驱动），字符内容按 refresh 步更新（≤12 Hz）
-    def render_state(self,img,key,refresh,color,p=None,front=None,direction='h',rects=None,alive=None,tear_fn=None,tear=False):
+    def render_state(self,img,key,refresh,color,p=None,front=None,direction='h',rects=None,alive=None,tear_fn=None,tear=False,no_dim=False):
         """p：覆盖比例 0–1（成团+主体保护顺序）；front：扫描式前沿 0–1；rects：局部块（窗口归一化坐标）；alive：收束熄灭进度 0–1（>0 时被熄灭的格子变纯黑）。
         返回 (img, 覆盖掩码 R×C)。"""
         h,w=img.shape[:2]; R,C=h//self.ch,w//self.cw
@@ -168,7 +168,7 @@ class GlyphDissolve:
             p=float(p or 0.0); p_eff=p
             if p<=0: return out,np.zeros((R,C),np.float32)
             mask=np.ones((R,C),np.float32) if p>=1 else (self.order_field(R,C,L)<p).astype(np.float32)
-        res=self.paint(out,idx,mask,color,dim_rest=self.p.bg_dim*p_eff if self.p.bg_dim else None)
+        res=self.paint(out,idx,mask,color,dim_rest=0.0 if no_dim else (self.p.bg_dim*p_eff if self.p.bg_dim else None))   # no_dim：局部溶解只改块内像素，不得改变整帧亮度
         if front is not None and front<1.0:   # 终端光标：前沿一格最重字符
             cur=(np.abs(ax-front)<(1.0/(C if direction=='h' else R))).astype(np.float32)
             res=self.paint(res,np.full_like(idx,self.n-1),cur,np.minimum(255,np.asarray(color)*1.2),dim_rest=0.0)
