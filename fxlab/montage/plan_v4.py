@@ -184,8 +184,8 @@ for k,s in enumerate(shots):
         cs=ons_in(CORP); fx+=[f'stutter:3f@{x-s["t"]:.3f} rgb:2f@{x-s["t"]:.3f}' for x in cs]
         others=[x for x in ons_in(PK) if all(abs(x-c)>0.12 for c in cs)]
         others=sorted(sorted(others,key=lambda x:-ostr(x))[:int(2*s['dur'])])
-        for x in others:
-            ee=at(E_,x); typ='rgb:2f' if ee<0.5 else ('block:3f' if ee<0.75 else 'tear:4f'); fx.append(f'{typ}@{x-s["t"]:.3f}')
+        for r_i,x in enumerate(others):   # 类型轮换 rgb/block/tear，帧数随能量 2–4
+            ee=at(E_,x); nf=2 if ee<0.5 else (3 if ee<0.75 else 4); fx.append(f"{['rgb','block','tear'][r_i%3]}:{nf}f@{x-s['t']:.3f}")
     elif seg=='sparse': fx=['scan:0.25','vignette:0.6','noise:0.2','desat:0.2']
     elif seg=='frag':
         fx=['scan:0.3','noise:0.2','vignette:0.4']
