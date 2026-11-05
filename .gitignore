@@ -11,3 +11,4 @@ fxlab/montage/output/*
 # v2 素材（手工拆好的片段）
 fxlab/montage/input2/*
 !fxlab/montage/input2/.gitkeep
+__pycache__/
