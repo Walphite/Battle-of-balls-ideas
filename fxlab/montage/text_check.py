@@ -3,7 +3,7 @@ import os,sys,json,subprocess,numpy as np
 os.chdir(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,'.')
 W,H=960,540
 def bga_frame(t):
-    p=subprocess.run(['ffmpeg','-v','error','-ss',f'{t+0.16:.3f}','-i','input2/bga/Credits.bga.mp4','-frames:v','1','-vf','crop=iw*0.84:ih:iw*0.08:0,scale=960:-2,crop=960:540','-f','rawvideo','-pix_fmt','rgb24','-'],capture_output=True).stdout
+    p=subprocess.run(['ffmpeg','-v','error','-ss',f'{t+0.16:.3f}','-i','input2/bga/Credits.bga.mp4','-frames:v','1','-vf','scale=960:540','-f','rawvideo','-pix_fmt','rgb24','-'],capture_output=True).stdout
     return np.frombuffer(p,np.uint8).reshape(H,W,3).astype(np.float32)
 def prev_frame(fn,t):
     p=subprocess.run(['ffmpeg','-v','error','-ss',f'{t:.4f}','-i',fn,'-frames:v','1','-f','rawvideo','-pix_fmt','rgb24','-'],capture_output=True).stdout
