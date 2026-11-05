@@ -12,7 +12,7 @@ BGA_MAIN=np.array([41,59,79],np.float32); TONE_LO=np.array([41,59,79],np.float32
 A=pickle.load(open('work/audio_an.pkl','rb')); PK=A['pk']
 ACC=json.load(open('work/bga_accent.json')); BEATS=np.array(json.load(open('work/beats_v4.json'))['beats'])
 CLIPS={int(r['clip_id']):r for r in csv.DictReader(open('work/clips.csv',encoding='utf-8'))}
-EVENT_TYPES=('rgb','block','tear','stutter','bga_accent')
+EVENT_TYPES=('rgb','block','tear','stutter','bga_accent','hit')
 def hex2rgb(h): return np.array([int(h[i:i+2],16) for i in (1,3,5)],np.float32)
 def accent_at(t):
     c=hex2rgb(ACC['per10s'][min(len(ACC['per10s'])-1,int(t//10))][1]); m=c.max()
@@ -36,11 +36,13 @@ def parse_fx(tokens):
     return base,sorted(ev)
 def load_edl():
     out=[]
-    for r in csv.DictReader(open('work/edl.csv',encoding='utf-8')):
+    for r in csv.DictReader(open(os.environ.get('EDL','work/edl.csv'),encoding='utf-8')):
         sp=r['speed']; s=dict(n=int(r['shot']),seg=r['seg'],t=float(r['t_start']),te=float(r['t_end']),beats=int(r['beats']),b0=int(r['beat_start']),clip=int(r['clip_id']),
             src_in=float(r['src_in']),src_out=float(r['src_out']),win=float(r['win_pct'])/100,ascii=float(r['ascii_s']),flash=int(r['flash']))
         s['dur']=s['te']-s['t']
-        if sp.startswith('ramp'):
+        if sp.startswith('hit'):
+            p=sp.split(':'); s['mode']='hit'; s['va']=float(p[1]); s['vb']=float(p[2]); s['tauh']=float(p[3]); s['w']=float(p[4]); s['v']=(s['va']+s['vb'])/2
+        elif sp.startswith('ramp'):
             p=sp.split(':'); s['mode']='ramp'; s['v']=float(p[1]); kv={k:float(v) for k,v in (x.split('=') for x in p[2:])}; s['hit']=kv['hit']; s['dip']=kv.get('dip',0.5); s['w']=kv.get('w',0.5)
         else: s['mode']='uniform'; s['v']=float(sp)
         s['base'],s['events']=parse_fx(r['fx'].split()); out.append(s)
@@ -48,6 +50,8 @@ def load_edl():
 def src_map(s):
     """返回 τ 网格与源时间（相对 src_in）数组。ramp：击中点附近梯形 dip（0.1 坡+0.3 平台+0.1 坡）降到 dip×。"""
     L=s['dur']; dt=1/600; n=int(L/dt)+2; tau=np.arange(n)*dt
+    if s['mode']=='hit':      # 吞噬前后两段速度，吞噬点两侧 ±w 内平滑缓动（smoothstep），不拆分素材
+        x=np.clip((tau-(s['tauh']-s['w']))/(2*s['w']),0,1); sm=x*x*(3-2*x); v=s['va']+(s['vb']-s['va'])*sm; src=np.cumsum(v)*dt; src-=src[0]; return tau,src
     if s['mode']!='ramp': return tau,tau*s['v']
     v0=s['v']; w=s['w']; plateau=w-0.2; th=min(max(s['hit']/v0+0.1,0.3),L-0.3)
     a=th-w/2; m=np.ones(n)

@@ -175,6 +175,36 @@ class Composer:
         if sm.max()<=0: return np.zeros((H,W),np.float32)
         im=Image.fromarray((sm*255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(max(0.5,8*k/4))).resize((W,H),Image.BILINEAR)
         return np.asarray(im,np.float32)/255.0
+    def text_layer(self,key_ink):
+        """BGA 文字层（V7）：按「文字行段」设置强度，整段同一强度、同一行内不随 x 变化。
+        行段 = 行带（行间隙≤4px）内按列间隙>40px 切开的连续文字；起点 x<40% 宽且中心 y<30% 高的行段（左上标题区）强度 0.95，其余 0.55。
+        返回 (alpha (H,W)，暗晕 (H,W)∈[0,1])：暗晕 = 字形掩膜膨胀 ~2.5px、高斯 ~5px，只在字形周围。"""
+        H,W,k=self.H,self.W,self.k; K=key_ink>0.5; rows=np.where(K.sum(1)>=2)[0]; A=np.zeros((H,W),np.float32); segs=[]
+        if len(rows):
+            bands=[[rows[0],rows[0]]]
+            for r in rows[1:]:
+                if r-bands[-1][1]<=int(4*k)+1: bands[-1][1]=r
+                else: bands.append([r,r])
+            for r0,r1 in bands:
+                cols=np.where(K[r0:r1+1].any(0))[0]
+                if not len(cols): continue
+                runs=[[cols[0],cols[0]]]
+                for c in cols[1:]:
+                    if c-runs[-1][1]<=int(40*k): runs[-1][1]=c
+                    else: runs.append([c,c])
+                for c0,c1 in runs:
+                    title=(c0<0.40*W) and ((r0+r1)/2<0.30*H); st=0.95 if title else 0.60
+                    A[r0:r1+1,c0:c1+1]=np.maximum(A[r0:r1+1,c0:c1+1],key_ink[r0:r1+1,c0:c1+1]*st); segs.append((r0,r1,c0,c1,st))
+        if not segs: return A,np.zeros((H,W),np.float32)
+        m=Image.fromarray((K*255).astype(np.uint8)).filter(ImageFilter.MaxFilter(2*max(1,int(round(2.5*k)))+1)).filter(ImageFilter.GaussianBlur(5*k))
+        return A,np.asarray(m,np.float32)/255.0
+    def sat(self,t):
+        """崩坏滤镜：游戏层全局饱和度 S(t)（控制点表 work/sat_curve.csv，线性插值后 ~0.25s 汉宁平滑）"""
+        if LEGACY: return 1.0
+        if not hasattr(self,'_sat'):
+            pts=[tuple(map(float,l.split(','))) for l in open('work/sat_curve.csv').read().split('\n')[1:] if l.strip()]
+            tt=np.arange(0,T+1,1/60); v=np.interp(tt,[p[0] for p in pts],[p[1]/100 for p in pts]); k=np.hanning(15); k/=k.sum(); self._sat=(tt,np.convolve(np.pad(v,7,mode='edge'),k,'valid'))
+        return float(np.interp(t,*self._sat))
     # ---- 单帧
     def frame(self,kf,t,shots,s,plan,cache,bga):
         W,H,k=self.W,self.H,self.k; fx=self.fx; tau=t-s['t']; base=s['base']; ev=s['events']
@@ -188,16 +218,21 @@ class Composer:
         if 'contrast' in base: piv=img.mean(); img=piv+(img-piv)*base['contrast']
         if 'dim' in base: img=img*base['dim']
         z=1.0
+        for off,typ,nf in ev:                                                      # 吞噬重音：缩放脉冲 ≤4%（3–4 帧衰减）
+            if typ=='hit' and off<=tau<off+nf*FR: z=max(z,1+0.04*(1-(tau-off)/(nf*FR)))
         if 'beatpulse' in base:
             amp,every=base['beatpulse']; bb=R4.BEATS[s['b0']:s['b0']+s['beats']+1:every]; prev=bb[bb<=t+0.012]
             if len(prev): z=max(z,1+amp*math.exp(-max(t-prev[-1],0)/0.12))
         img=fx.zoom(img,z); rgb_now=False; accent_now=False
+        S=self.sat(t)
+        if S<0.999: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*S          # 只对游戏层去饱和，BGA 文字层不受影响
         for off,typ,nf in ev:
             if not(off<=tau<off+nf*FR): continue
             if typ=='rgb': rgb_now=True
             elif typ=='block': img=fx.block(img)
             elif typ=='tear': img=fx.tear(img)
             elif typ=='bga_accent': accent_now=True
+            elif typ=='hit' and tau<off+2*FR: rgb_now=True                       # 吞噬重音：前 2 帧 RGB 色差
         if 'shake' in base: img=fx.shake(img,base['shake'])
         if not LEGACY: img=self.terminalize_icons(img,crop,wh,ww)
         img_pre=img.copy()                                                       # 溶解前的游戏层：光晕颜色取自它（背景变暗不得作用于 BGA 层）
@@ -206,6 +241,7 @@ class Composer:
         for e in self.sched:
             st=self.state(e,t)
             if st is None: continue
+            if e['kind']=='out' and st.get('p',0)>0 and not LEGACY: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*max(0.0,1-0.85*st['p'])   # 溶出覆盖期间饱和度随覆盖率下降（100% 时 ≤15%）
             img,m=self.gd.render_state(img,e['id'],st['refresh'],col,p=st.get('p'),front=st.get('front'),direction=st.get('direction','h'),rects=st.get('rects'),alive=st.get('alive'),tear_fn=fx.tear,tear=st.get('tear',False),no_dim=(not LEGACY and st.get('rects') is not None))
             cp=np.repeat(np.repeat(m,self.gd.ch,0),self.gd.cw,1); full=np.zeros((wh,ww),np.float32); full[:cp.shape[0],:cp.shape[1]]=cp[:wh,:ww]
             covpx=full if covpx is None else np.maximum(covpx,full)
@@ -222,7 +258,10 @@ class Composer:
         # ---- 合成：窗口内容向黑渐变；外溢光晕（取自画面边缘 ~40px 平均色）
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img
         canvas=full*M[...,None]
-        if not LEGACY: canvas=canvas*(1-0.6*self.text_substrate(key_ink))[...,None]       # BGA 文字行衬底：游戏层压暗 60%
+        if not LEGACY:
+            TA,TH=self.text_layer(key_ink)
+            if self.ink<=0: TA=TA*0; TH=TH*0                                           # 关闭文字层的诊断渲染
+            canvas=canvas*(1-0.55*TH)[...,None]               # 跟字形走的暗晕：游戏层压暗 50%
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img_pre                  # 以下光晕取色用溶解前的画面
         bw=int(40*k); inner=np.zeros((H,W),np.float32); inner[y+bw:y+wh-bw,x+bw:x+ww-bw]=1; win_m=np.zeros((H,W),np.float32); win_m[y:y+wh,x:x+ww]=1; band=win_m-inner
         num=blur_img(full*band[...,None],60*k); den=blur_img(band*255.0,60*k)/255.0
@@ -230,12 +269,13 @@ class Composer:
         s0=self.P['spill_strength']; inside_term=(1-M)*win_m                 # 窗内渐变带：向光晕色（而非纯黑）过渡，保证由内向外单调
         spill=colf*(s0*fall+s0*inside_term)[...,None]
         canvas=255-(255-canvas)*(255-np.minimum(spill,255))/255
-        # ---- BGA 字符穿透：窗外 ~50%，窗内 ~25%，窗中心 ≤8%；溶解时覆盖格（多孔）露出字符
-        Gm=(1-M)*0.50+M*(0.25-0.17*Cn)
-        if covpx is not None:
-            cp_full=np.zeros((H,W),np.float32); cp_full[y:y+wh,x:x+ww]=covpx; Gm=np.maximum(Gm,cp_full*M*0.75)
-        if not LEGACY: Gm=np.maximum(Gm,0.92*self.title_region())                           # 左上约 40%×30%：BGA 字符 85–100%
-        canvas=255-(255-canvas)*(255-ink*Gm[...,None])/255
+        if LEGACY:
+            Gm=(1-M)*0.50+M*(0.25-0.17*Cn)
+            if covpx is not None:
+                cp_full=np.zeros((H,W),np.float32); cp_full[y:y+wh,x:x+ww]=covpx; Gm=np.maximum(Gm,cp_full*M*0.75)
+            canvas=255-(255-canvas)*(255-ink*Gm[...,None])/255
+        else:
+            canvas=canvas*(1-TA[...,None])+ink*TA[...,None]                                   # 文字行：正常 alpha 叠加（不用 screen），字色保持 BGA 原色，位于游戏层之上
         # ---- 整帧统一后期
         if rgb_now: canvas=fx.rgb_split(canvas,max(1,int(W*0.006)))
         canvas=fx.scanlines(canvas,base.get('scan',0.1))

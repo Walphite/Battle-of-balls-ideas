@@ -9,13 +9,9 @@ SEG={'A':(0,2976),'B':(2976,6254),'C':(6254,NF)}      # 段界 = EDL 镜头边�
 H=540; W=960; CH=300                    # 块 = 300 帧 = 10 s
 DELIV='../deliver/preview'; os.makedirs(DELIV,exist_ok=True); os.makedirs('work/full',exist_ok=True)
 def audio_master():
-    out='work/full/audio_master.wav'
-    if os.path.exists(out): return out
-    af='afade=t=in:st=0:d=1.5,afade=t=out:st=276.126:d=2.68'
-    m=subprocess.run(['ffmpeg','-hide_banner','-i',R4.MUS,'-af',af+',loudnorm=I=-10.5:TP=-3.0:LRA=11:print_format=json','-f','null','-'],capture_output=True,text=True).stderr
-    j=json.loads(m[m.rindex('{'):]); 
-    ln=f"loudnorm=I=-10.5:TP=-3.0:LRA=11:measured_I={j['input_i']}:measured_TP={j['input_tp']}:measured_LRA={j['input_lra']}:measured_thresh={j['input_thresh']}:offset={j['target_offset']}:linear=true"
-    subprocess.run(['ffmpeg','-v','error','-y','-i',R4.MUS,'-af',af+','+ln,'-ar','48000','-ac','2',out],check=True); return out
+    """连续 mix.wav（0–278.8 s）：原曲 + 淡入淡出 + 静态增益 −3.4 dB + 限幅器（仅防真峰值，lookahead 7ms，release 150ms）。
+    不再使用 loudnorm（原曲真峰值 +2.46 dBTP，目标 TP 下 linear 模式无法成立，回退为动态模式，77.5–101 s 被限幅器压到 −42 dB）。"""
+    return 'work/audio/mix.wav'
 def seg_chunks(name):
     a,b=SEG[name]; return [(c,min(b,c+CH)) for c in range(a,b,CH)]
 def chunk_path(name,c): return f'work/full/{name}/c_{c:05d}.mp4'
@@ -31,7 +27,7 @@ def mux(name):
     a,b=SEG[name]; d=f'work/full/{name}'; lst=f'{d}/list.txt'; open(lst,'w').write(''.join(f"file '{os.path.abspath(chunk_path(name,c0))}'\n" for c0,c1 in seg_chunks(name)))
     v=f'{d}/video.mp4'; subprocess.run(['ffmpeg','-v','error','-y','-f','concat','-safe','0','-i',lst,'-c','copy',v],check=True)
     m=audio_master(); out=f'{DELIV}/preview_{name}.mp4'
-    subprocess.run(['ffmpeg','-v','error','-y','-i',v,'-ss',f'{a/FPS:.6f}','-t',f'{(b-a)/FPS:.6f}','-i',m,'-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-b:a','256k','-movflags','+faststart',out],check=True)
+    subprocess.run(['ffmpeg','-v','error','-y','-i',v,'-ss',f'{a/FPS:.6f}','-t',f'{(b-a)/FPS:.6f}','-i',m,'-map','0:v','-map','1:a','-c:v','copy','-c:a','aac','-b:a','256k','-aac_pns','0','-aac_is','0','-movflags','+faststart',out],check=True)
     print('muxed',out,os.path.getsize(out)/1e6,'MB'); return out
 if __name__=='__main__':
     n=sys.argv[1]
