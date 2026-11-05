@@ -9,6 +9,7 @@ from effects.glyph_dissolve import GlyphDissolve,GlyphParams
 FPS=R4.FPS; FR=R4.FR; T=R4.T; ASPECT=R4.ASPECT
 FINE=np.load('work/onsets_fine.npz'); FT=FINE['t']           # 真实起音（校准后）
 PARAMS=dict(fade_width=80.0,spill_width=120.0,spill_strength=0.38)
+PBS_ON=os.environ.get('PBS','1')=='1'
 PROBE=os.environ.get('PROBE')=='1'                                    # 1 = 只计算逐帧统计，不编码
 LEGACY=os.environ.get('LEGACY')=='1'                                   # 1 = 左上角清理与整帧变暗修复全部关闭（用于「修改前」对照渲染）
 CROP_MODES=json.load(open('work/crop_modes.json')) if os.path.exists('work/crop_modes.json') else {}
@@ -73,12 +74,14 @@ class Composer:
         self.sched=[e for e in schedule if e['kind'] not in off]
         for e in self.sched: self._prep(e)
     def _prep(self,e):
-        k=e['kind']; e['id']=e.get('id',f"{k}@{e.get('A0',e.get('t',0)):.3f}")
+        k=e['kind']; e['id']=e.get('id',f"{k}@{e.get('A0',e.get('t',0)):.3f}"); e.setdefault('pmax',1.0)
         if k=='out':
             e['S']=int(min(2*e['n_eighths'],math.floor((e['A1']-e['A0'])/0.0834))); e['t_s']=e['A0']-0.5; e['t_e']=e['A2']
         elif k=='in':
             e['S']=int(min(4,math.floor((e['A1']-e['A0'])/0.0834))); e['t_s']=e['B0']; e['t_e']=e['A1']+1e-6
         elif k=='scan': e['t_s']=e['A0']; e['t_e']=e['A2']
+        elif k=='f':      # 交叉溶解：A 尾字符覆盖 0→100%，中点（镜头边界 M）硬切，B 头 100%→0
+            e['S1']=int(round((e['M']-e['A0'])/0.0838)); e['S2']=int(round((e['A1']-e['M'])/0.0838)); e['t_s']=e['A0']; e['t_e']=e['A1']
         elif k=='local': e['t_s']=e['t']; e['t_e']=e['t']+e['dur']
         elif k=='final':
             e['q']=e.get('q',0.16764); e['A1f']=e['A0']+6*e['q']; e['S']=int(min(12,math.floor((e['A1f']-e['A0'])/0.0834))); e['t_s']=e['A0']; e['t_e']=e['t_end']
@@ -90,12 +93,15 @@ class Composer:
             if t<e['A0']-0.35: return dict(p=0.0,tear=True,refresh=-2)
             if t<e['A0']: return dict(p=0.0,tear=False,refresh=-1)
             S=e['S']; dt=(e['A1']-e['A0'])/S
-            if t>=e['A1']: return dict(p=1.0,refresh=S)
-            j=min(S,int((t-e['A0'])/dt+1e-9)); return dict(p=(j+1)/(S+1),refresh=j)
+            if t>=e['A1']: return dict(p=e['pmax'],refresh=S)
+            j=min(S,int((t-e['A0'])/dt+1e-9)); return dict(p=e['pmax']*(j+1)/(S+1),refresh=j)
+        if k=='f':
+            if t<e['M']: j=min(e['S1']-1,int((t-e['A0'])/((e['M']-e['A0'])/e['S1'])+1e-9)); return dict(p=(j+1)/e['S1'],refresh=j,half='a')
+            j=min(e['S2']-1,int((t-e['M'])/((e['A1']-e['M'])/e['S2'])+1e-9)); return dict(p=1-j/e['S2'],refresh=100+j,half='b')
         if k=='in':
-            if t<e['A0']: return dict(p=1.0,refresh=-1)
-            S=e['S']; dt=(e['A1']-e['A0'])/S; j=min(S,int((t-e['A0'])/dt+1e-9)); return dict(p=1-(j+1)/(S+1),refresh=j)
-        if k=='scan': return dict(front=(t-e['A0'])/(e['A2']-e['A0']),direction=e.get('direction','h'),refresh=int((t-e['A0'])/0.1))
+            if t<e['A0']: return dict(p=e['pmax'],refresh=-1)
+            S=e['S']; dt=(e['A1']-e['A0'])/S; j=min(S,int((t-e['A0'])/dt+1e-9)); return dict(p=e['pmax']*(1-(j+1)/(S+1)),refresh=j)
+        if k=='scan': return dict(front=e['pmax']*(t-e['A0'])/(e['A2']-e['A0']),direction=e.get('direction','h'),refresh=int((t-e['A0'])/0.1))
         if k=='local': return dict(rects=e['rects'],refresh=0)
         if k=='final':
             if t<e['A1f']:
@@ -151,7 +157,8 @@ class Composer:
         if key not in self.cc:
             u=(np.arange(ww,dtype=np.float32)+0.5)/ww; v=(np.arange(wh,dtype=np.float32)+0.5)/wh
             r=np.sqrt((u[None,:]/0.35)**2+(v[:,None]/0.32)**2); a=0.6*(1-smooth01(r))
-            top=1-np.clip(v/(0.09 if grad else 0.015),0,1); a=1-(1-a)*(1-top[:,None]); self.cc[key]=a.astype(np.float32)
+            top=1-np.clip(v/(0.09 if grad else 0.015),0,1); a=1-(1-a)*(1-top[:,None])
+            bot=np.clip((v-0.94)/0.06,0,1); a=1-(1-a)*(1-bot[:,None]); self.cc[key]=a.astype(np.float32)       # 窗口底部 6% 高度向黑渐变：底行 BGA 文字背后是黑色
         return img*(1-self.cc[key])[...,None]
     def title_region(self):
         key=('title',self.W,self.H)
@@ -195,21 +202,57 @@ class Composer:
                 for c0,c1 in runs:
                     title=(c0<0.40*W) and ((r0+r1)/2<0.30*H); st=0.95 if title else 0.85
                     A[r0:r1+1,c0:c1+1]=np.maximum(A[r0:r1+1,c0:c1+1],key_ink[r0:r1+1,c0:c1+1]*st); segs.append((r0,r1,c0,c1,st))
+        TB=np.zeros((H,W),np.float32); pad=int(round(6*k))
+        for r0,r1,c0,c1,st in segs: TB[max(0,r0-pad):r1+pad+1,max(0,c0-pad):c1+pad+1]=1
+        self._TB=TB
         if not segs: return A,np.zeros((H,W),np.float32),np.zeros((H,W),np.float32)
         im=Image.fromarray((K*255).astype(np.uint8)); m=im.filter(ImageFilter.MaxFilter(2*max(1,int(round(2.5*k)))+1)).filter(ImageFilter.GaussianBlur(5*k))
         ring=np.asarray(im.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(0.6*k)),np.float32)/255.0      # ~1.5px 深色描边
         return A,np.asarray(m,np.float32)/255.0,np.clip(ring-K.astype(np.float32),0,1)
     def sat(self,t):
         """崩坏滤镜：游戏层全局饱和度 S(t)（控制点表 work/sat_curve.csv，线性插值后 ~0.25s 汉宁平滑）"""
-        if LEGACY: return 1.0
+        return 1.0
         if not hasattr(self,'_sat'):
             pts=[tuple(map(float,l.split(','))) for l in open('work/sat_curve.csv').read().split('\n')[1:] if l.strip()]
             tt=np.arange(0,T+1,1/60); v=np.interp(tt,[p[0] for p in pts],[p[1]/100 for p in pts]); k=np.hanning(15); k/=k.sum(); self._sat=(tt,np.convolve(np.pad(v,7,mode='edge'),k,'valid'))
         return float(np.interp(t,*self._sat))
+    def pbs(self,TA,key_ink,ink,img,x,y,wh,ww,M,t,s,ev,tau):
+        """PBS 折中（192–226 s）：主体掩膜内 BGA 字符 12%，掩膜外 65%；文字密度>6% 时窗内上限 40% 且红字亮度×0.8；窗外（黑边）保持原强度；
+        碎片起音（局部溶解/定格重复）处 ≤0.25s 内升到 100% 再回落。返回 (TA, ink, 指标)。"""
+        H,W=self.H,self.W; k=self.k
+        L=(img@np.array([0.299,0.587,0.114],np.float32))/255.0; mx=img.max(2)/255.0; mn=img.min(2)/255.0; sat=(mx-mn)/np.maximum(mx,1e-3)
+        m=((L>0.35)|((sat>0.35)&(mx>0.45))).astype(np.uint8)*255      # 暗背景的高饱和不算主体：要求明度也够
+        im=Image.fromarray(m).filter(ImageFilter.MinFilter(2*int(round(3*k))+1)).filter(ImageFilter.MaxFilter(2*int(round(3*k))+1+2*int(round(6*k)))).filter(ImageFilter.GaussianBlur(8*k))
+        subj=np.zeros((H,W),np.float32); subj[y:y+wh,x:x+ww]=np.asarray(im,np.float32)/255.0
+        Mw=(M>0.02).astype(np.float32)*np.clip(M*1.0,0,1)                                   # 窗内权重（渐变带内按 M）
+        dens=float(((key_ink>0.5)*(M>0.5)).sum()/max(1.0,(M>0.5).sum()))
+        base=0.65*(1-subj)+0.12*subj
+        yy=(np.arange(H,dtype=np.float32)-y)/max(wh,1)[...,None] if False else ((np.arange(H,dtype=np.float32)-y)/max(wh,1))[:,None]
+        base=np.maximum(base,np.clip((yy-0.68)/0.04,0,1)*(1.0-base))      # 底部「No access points…/Sending >」行：全强度（与项目一一致）
+        if dens>0.06: base=np.minimum(base,0.40)
+        boost=0.0
+        for e in self.sched:
+            if e['kind']=='local' and e['t_s']<=t<e['t_s']+0.25: boost=max(boost,1-(t-e['t_s'])/0.25)
+        for off,typ,nf in ev:
+            if typ=='stutter' and off<=tau<off+0.25: boost=max(boost,1-(tau-off)/0.25)
+        if boost>0: base=base+(1.0-base)*boost
+        TAw=np.minimum(TA,0.0)+key_ink*base; TA2=TA*(1-Mw)+TAw*Mw
+        if dens>0.06: ink=ink*(1-0.2*Mw[...,None])
+        den=max(float(subj.sum()),1.0)
+        return TA2,ink,dict(cov_before=round(float((TA*subj).sum()/den),4),cov_after=round(float((TA2*subj).sum()/den),4),dens=round(dens,3),boost=round(boost,2))
+    def sat_shot(self,shot,t):
+        """事件式黑白（V10）：黑白镜头（人声减弱区/收束分级）与溶解硬切后的褪回；由 work/bw_plan.json 给出"""
+        if not hasattr(self,'_bw'):
+            self._bw=json.load(open('work/bw_plan.json')) if os.path.exists('work/bw_plan.json') and os.environ.get('NOBW')!='1' else dict(bw_shots={},fadeback=[])
+        S=float(self._bw['bw_shots'].get(str(shot),1.0))
+        for t0,du in self._bw['fadeback']:
+            if t0<=t<t0+du: x=(t-t0)/du; S=min(S,x*x*(3-2*x))
+        return S
     # ---- 单帧
     def frame(self,kf,t,shots,s,plan,cache,bga):
         W,H,k=self.W,self.H,self.k; fx=self.fx; tau=t-s['t']; base=s['base']; ev=s['events']
         crop,grad=crop_for(s)
+        b0,key_ink=clean_bga(bga.read().astype(np.float32)); TA0,TH0,TO0=self.text_layer(key_ink); TB=self._TB          # 先读 BGA：文字行外接框用于特效避让
         win=R4.interp_win(shots,s,t); wh,ww,x,y=self.geometry(win,crop)
         key=(s['n'],wh)
         if key not in cache: cache.clear(); cache[key]=decode_frames2(s,wh,plan[s['n']],crop)
@@ -225,7 +268,8 @@ class Composer:
             amp,every=base['beatpulse']; bb=R4.BEATS[s['b0']:s['b0']+s['beats']+1:every]; prev=bb[bb<=t+0.012]
             if len(prev): z=max(z,1+amp*math.exp(-max(t-prev[-1],0)/0.12))
         img=fx.zoom(img,z); rgb_now=False; accent_now=False
-        S=self.sat(t)
+        S=self.sat_shot(s['n'],t)
+        img_base=img.copy()
         if S<0.999: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*S          # 只对游戏层去饱和，BGA 文字层不受影响
         for off,typ,nf in ev:
             if not(off<=tau<off+nf*FR): continue
@@ -235,6 +279,8 @@ class Composer:
             elif typ=='bga_accent': accent_now=True
             elif typ=='hit' and tau<off+2*FR: rgb_now=True                       # 吞噬重音：前 2 帧 RGB 色差
         if 'shake' in base: img=fx.shake(img,base['shake'])
+        TBw=TB[y:y+wh,x:x+ww][...,None]
+        if not LEGACY: img=img*(1-TBw)+img_base*TBw                       # 撕裂/块位移在文字行外接框(+6px)内避让
         if not LEGACY: img=self.terminalize_icons(img,crop,wh,ww)
         img_pre=img.copy()                                                       # 溶解前的游戏层：光晕颜色取自它（背景变暗不得作用于 BGA 层）
         # ---- 字符溶解（锚点驱动；字符色 = 米黄）
@@ -242,8 +288,17 @@ class Composer:
         for e in self.sched:
             st=self.state(e,t)
             if st is None: continue
-            if e['kind']=='out' and st.get('p',0)>0 and not LEGACY: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*max(0.0,1-0.85*st['p'])   # 溶出覆盖期间饱和度随覆盖率下降（100% 时 ≤15%）
-            img,m=self.gd.render_state(img,e['id'],st['refresh'],col,p=st.get('p'),front=st.get('front'),direction=st.get('direction','h'),rects=st.get('rects'),alive=st.get('alive'),tear_fn=fx.tear,tear=st.get('tear',False),no_dim=(not LEGACY and st.get('rects') is not None))
+            if e['kind'] in('out','in','f','scan') and not LEGACY:        # 溶解覆盖期间游戏层黑白：饱和度 = 1 − 覆盖率（覆盖 100% 时为 0，亮度不变）
+                pp=st.get('p',st.get('front',0.0)) or 0.0
+                if pp>0: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*max(0.0,1-pp)
+            if e['kind']=='local' and not LEGACY and os.environ.get('NOBW')!='1':     # 局部黑白：矩形内饱和度归零（亮度不变），随局部溶解同步
+                for r0 in st['rects']:
+                    ya,yb,xa,xb=int(r0[1]*wh),int(r0[3]*wh),int(r0[0]*ww),int(r0[2]*ww)
+                    if 202<=t<219.6:
+                        sub=img[ya:yb,xa:xb]; L_=sub@np.array([0.299,0.587,0.114],np.float32); img[ya:yb,xa:xb]=np.repeat(L_[...,None],3,2)
+            img_prev=img
+            img,m=self.gd.render_state(img,e['id']+st.get('half',''),st['refresh'],col,p=st.get('p'),front=st.get('front'),direction=st.get('direction','h'),rects=st.get('rects'),alive=st.get('alive'),tear_fn=fx.tear,tear=st.get('tear',False),no_dim=(not LEGACY and st.get('rects') is not None))
+            if e['kind']=='local' and not LEGACY: img=img*(1-TBw)+img_prev*TBw      # 局部溶解块在文字行外接框内避让
             cp=np.repeat(np.repeat(m,self.gd.ch,0),self.gd.cw,1); full=np.zeros((wh,ww),np.float32); full[:cp.shape[0],:cp.shape[1]]=cp[:wh,:ww]
             covpx=full if covpx is None else np.maximum(covpx,full)
             act.append(dict(id=e['id'],kind=e['kind'],p=round(float(st.get('p',st.get('front',1.0) if 'front' in st else 1.0)),3),refresh=st['refresh']))
@@ -251,7 +306,7 @@ class Composer:
         if not LEGACY: img=self.finish_game(img,crop,grad); img_pre=self.finish_game(img_pre,crop,grad)
         else: img_pre=img
         # ---- BGA：原始背景（纯黑）+ 字符墨水
-        b=bga.read().astype(np.float32); b,key_ink=clean_bga(b)
+        b=b0
         j=np.searchsorted(FT,t); last=FT[j-1] if j>0 else -9; pulse=math.exp(-(t-last)/0.12) if t-last<0.4 else 0
         if accent_now: pulse=max(pulse,1.0)+0.5
         ink=np.minimum(b*(1+0.3*pulse),255.0)*self.ink
@@ -260,7 +315,9 @@ class Composer:
         full=np.zeros((H,W,3),np.float32); full[y:y+wh,x:x+ww]=img
         canvas=full*M[...,None]
         if not LEGACY:
-            TA,TH,TO=self.text_layer(key_ink)
+            TA,TH,TO=TA0,TH0,TO0
+            self._pbs_meta=None
+            if PBS_ON and 192<=t<226: TA,ink,self._pbs_meta=self.pbs(TA,key_ink,ink,img,x,y,wh,ww,M,t,s,ev,tau)
             if self.ink<=0: TA=TA*0; TH=TH*0; TO=TO*0                                  # 关闭文字层的诊断渲染
             canvas=canvas*(1-0.50*TH)[...,None]                                          # 字形暗晕（压暗 50%）
             canvas=canvas*(1-0.75*TO)[...,None]                                          # 1.5px 深色描边（不透明度 75%）               # 跟字形走的暗晕：游戏层压暗 50%
@@ -292,7 +349,7 @@ class Composer:
             a=0.6*math.exp(-tau/0.05); canvas=canvas*(1-a)+255*a
         if t<1.5: canvas*=t/1.5
         if t>T-2.68: canvas*=max(0,(T-t)/2.68)
-        canvas=np.clip(canvas,0,255); self.meta.append(dict(k=kf,t=round(t,4),shot=s['n'],x=x,y=y,ww=ww,wh=wh,dis=act,lum=round(float(canvas.mean()/255),4)))
+        canvas=np.clip(canvas,0,255); self.meta.append(dict(k=kf,t=round(t,4),shot=s['n'],x=x,y=y,ww=ww,wh=wh,dis=act,lum=round(float(canvas.mean()/255),4),**({'pbs':self._pbs_meta} if getattr(self,'_pbs_meta',None) else {})))
         return canvas
 def render_chunk(comp,c0,c1,fn,crf,maxrate,shots):
     W,H=comp.W,comp.H; n0=int(round(c0*FPS)); n1=int(round(c1*FPS))

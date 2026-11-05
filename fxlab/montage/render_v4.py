@@ -90,7 +90,7 @@ def decode_frames(s,wh,need_idx):
 class BgaReader:
     def __init__(self,t_start,W,H,content_fit):
         self.W,self.H=W,H
-        vf=f'fps={FPS},crop=iw*0.84:ih:iw*0.08:0,scale={W}:-2,crop={W}:{H}' if content_fit else f'fps={FPS},scale={W}:{H}'
+        vf=(f'fps={FPS},crop=iw*0.84:ih:iw*0.08:0,scale={W}:-2,crop={W}:{H}' if (content_fit and os.environ.get('BGA_LEGACY')=='1') else f'fps={FPS},scale={W}:{H}')   # V10：BGA 整帧 100% 缩放（1280×720→画布，无裁切无平移）；旧映射会把最底文字行推出画面
         self.p=subprocess.Popen(['ffmpeg','-v','error','-ss',f'{t_start+BGA_OFF:.3f}','-i',BGA,'-an','-vf',vf,'-f','rawvideo','-pix_fmt','rgb24','-'],stdout=subprocess.PIPE)
         self.last=np.zeros((H,W,3),np.uint8)
     def read(self):
