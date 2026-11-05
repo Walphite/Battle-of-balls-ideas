@@ -9,7 +9,7 @@ from effects.glyph_dissolve import GlyphDissolve,GlyphParams
 FPS=R4.FPS; FR=R4.FR; T=R4.T; ASPECT=R4.ASPECT
 FINE=np.load('work/onsets_fine.npz'); FT=FINE['t']           # 真实起音（校准后）
 PARAMS=dict(fade_width=80.0,spill_width=120.0,spill_strength=0.38)
-PBS_ON=os.environ.get('PBS','1')=='1'; PBS0,PBS1=190.4,233.3; PBS_FALLBACK_WHITE=os.environ.get('PBS_WHITE','1')=='1'
+PBS_ON=os.environ.get('PBS','1')=='1'; BW_SCOPE=os.environ.get('BW_SCOPE','game'); KEEP_DISSOLVE_BW=os.environ.get('KEEP_DISSOLVE_BW','0')=='1'; LUMA709=np.array([0.2126,0.7152,0.0722],np.float32); PBS0,PBS1=190.4,233.3; PBS_FALLBACK_WHITE=os.environ.get('PBS_WHITE','1')=='1'
 PROBE=os.environ.get('PROBE')=='1'                                    # 1 = 只计算逐帧统计，不编码
 LEGACY=os.environ.get('LEGACY')=='1'                                   # 1 = 左上角清理与整帧变暗修复全部关闭（用于「修改前」对照渲染）
 CROP_MODES=json.load(open('work/crop_modes.json')) if os.path.exists('work/crop_modes.json') else {}
@@ -281,12 +281,15 @@ class Composer:
         den=max(float((subj*Mw).sum()),1.0); TAraw=TA; TA2c=key_ink*(1.0*(1-Mw)+A*Mw)
         return TA2,ink_n,TH,TO,gmap,dict(cov_before=round(float((TAraw*subj*Mw).sum()/den),4),cov_after=round(float((TA2c*subj*Mw).sum()/den),4),dens=round(dens,3),boost=round(boost,2),wb_mean=round(float(wb[K].mean()) if K.any() else 0,3))
     def sat_shot(self,shot,t):
-        """事件式黑白（V10）：黑白镜头（人声减弱区/收束分级）与溶解硬切后的褪回；由 work/bw_plan.json 给出"""
-        if not hasattr(self,'_bw'):
-            self._bw=json.load(open('work/bw_plan.json')) if os.path.exists('work/bw_plan.json') and os.environ.get('NOBW')!='1' else dict(bw_shots={},fadeback=[])
-        S=float(self._bw['bw_shots'].get(str(shot),1.0))
-        for t0,du in self._bw['fadeback']:
-            if t0<=t<t0+du: x=(t-t0)/du; S=min(S,x*x*(3-2*x))
+        """V3 关键帧式黑白：S(t) 由 work/bw_pulses.json（bw_plan_v3.py 由 bw_keyframes.csv 解析）给出；smoothstep 降—停—升。环境 NOBW=1 关闭。"""
+        if not hasattr(self,'_pl'):
+            self._pl=json.load(open('work/bw_pulses.json'))['pulses'] if os.path.exists('work/bw_pulses.json') and os.environ.get('NOBW')!='1' else []
+        S=1.0
+        for p in self._pl:
+            if t<p['t_fall0'] or (p['t_rise1'] is not None and t>=p['t_rise1']): continue
+            if t<p['t_peak']: x=(t-p['t_fall0'])/(p['t_peak']-p['t_fall0']); S=min(S,1-x*x*(3-2*x))
+            elif p['t_rise0'] is None or t<p['t_rise0']: S=0.0
+            else: x=(t-p['t_rise0'])/(p['t_rise1']-p['t_rise0']); S=min(S,x*x*(3-2*x))
         return S
     # ---- 单帧
     def frame(self,kf,t,shots,s,plan,cache,bga):
@@ -309,8 +312,8 @@ class Composer:
             if len(prev): z=max(z,1+amp*math.exp(-max(t-prev[-1],0)/0.12))
         img=fx.zoom(img,z); rgb_now=False; accent_now=False
         S=self.sat_shot(s['n'],t)
+        if S<0.999 and BW_SCOPE=='game': L_=img@LUMA709; img=L_[...,None]+(img-L_[...,None])*S          # 只对游戏层去饱和（Rec.709 亮度，保持亮度），BGA 文字层不受影响
         img_base=img.copy()
-        if S<0.999: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*S          # 只对游戏层去饱和，BGA 文字层不受影响
         for off,typ,nf in ev:
             if not(off<=tau<off+nf*FR): continue
             if typ=='rgb': rgb_now=True
@@ -328,10 +331,10 @@ class Composer:
         for e in self.sched:
             st=self.state(e,t)
             if st is None: continue
-            if e['kind'] in('out','in','f','scan') and not LEGACY:        # 溶解覆盖期间游戏层黑白：饱和度 = 1 − 覆盖率（覆盖 100% 时为 0，亮度不变）
+            if e['kind'] in('out','in','f','scan') and not LEGACY and KEEP_DISSOLVE_BW:        # 溶解覆盖期间游戏层黑白：饱和度 = 1 − 覆盖率（覆盖 100% 时为 0，亮度不变）
                 pp=st.get('p',st.get('front',0.0)) or 0.0
                 if pp>0: L_=img@np.array([0.299,0.587,0.114],np.float32); img=L_[...,None]+(img-L_[...,None])*max(0.0,1-pp)
-            if e['kind']=='local' and not LEGACY and os.environ.get('NOBW')!='1':     # 局部黑白：矩形内饱和度归零（亮度不变），随局部溶解同步
+            if e['kind']=='local' and not LEGACY and KEEP_DISSOLVE_BW:     # （V3 已删除）局部黑白：矩形内饱和度归零（亮度不变），随局部溶解同步
                 for r0 in st['rects']:
                     ya,yb,xa,xb=int(r0[1]*wh),int(r0[3]*wh),int(r0[0]*ww),int(r0[2]*ww)
                     if 202<=t<219.6:
@@ -382,6 +385,9 @@ class Composer:
             hi=np.clip((canvas.mean(2,keepdims=True)-0.68*255)/(0.32*255),0,1)*canvas; canvas=255-(255-canvas)*(255-blur_img(hi,14*k)*0.25)/255   # 泛光同样先于文字层：亮球的泛光不得染亮文字行
             canvas=canvas*(1-gmap*(key_ink*(TA>0)))[...,None] if pbs_mode else canvas*(1-0.9*(key_ink*(TA>0))[...,None])     # 字形内游戏层压暗（PBS：暗背景 90%、亮背景 55%）
             if not pbs_mode: canvas=canvas*(1-TA[...,None])+ink*TA[...,None]                  # 文字行：正常 alpha 叠加，字色保持 BGA 原色，位于游戏层之上
+        if BW_SCOPE=='all' and not LEGACY:
+            S_=self.sat_shot(s['n'],t)
+            if S_<0.999: L_=canvas@LUMA709; canvas=L_[...,None]+(canvas-L_[...,None])*S_
         # ---- 整帧统一后期
         if rgb_now: canvas=fx.rgb_split(canvas,max(1,int(W*0.006)))
         canvas=fx.scanlines(canvas,base.get('scan',0.1))
